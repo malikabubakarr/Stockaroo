@@ -6,21 +6,29 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "next lint",
+    "generate-icons": "node scripts/generate-icons.js"
   },
   "dependencies": {
-    "next": "16.1.6",
-    "react": "19.2.3",
-    "react-dom": "19.2.3"
+    "currency-codes": "^2.2.0",
+    "firebase": "^10.12.2",
+    "next": "14.2.5",
+    "next-pwa": "5.6.0",
+    "react": "^18",
+    "react-dom": "^18",
+    "sheetjs": "^2.0.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4",
+    "@tailwindcss/postcss": "^4.2.1",
+    "@types/next-pwa": "^5.6.9",
     "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "16.1.6",
-    "tailwindcss": "^4",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "autoprefixer": "^10.4.27",
+    "postcss": "^8.5.8",
+    "sharp": "^0.33.4",
+    "tailwindcss": "^4.0.0",
     "typescript": "^5"
   }
 }

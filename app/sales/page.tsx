@@ -1,0 +1,1439 @@
+"use client";
+
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import { auth, db } from "@/lib/firebase";
+import {
+  collection,
+  addDoc,
+  updateDoc,
+  doc,
+  query,
+  where,
+  onSnapshot,
+  orderBy,
+  serverTimestamp,
+  runTransaction,
+  limit,
+  increment,
+  getDoc,
+} from "firebase/firestore";
+import { useBranch } from "@/context/BranchContext";
+import Image from "next/image";
+import Link from "next/link";
+
+// Debug mode - set to false in production
+const DEBUG = false;
+
+interface Product {
+  id: string;
+  name: string;
+  qty: number;
+  saleRate: number;
+  profit: number;
+  allowSale: boolean;
+  purchaseRate?: number;
+}
+
+interface CartItem {
+  id: string;
+  name: string;
+  qty: number;
+  price: number;
+  profit: number;
+  purchaseRate?: number;
+}
+
+interface Sale {
+  id: string;
+  items: CartItem[];
+  createdBy: string;
+  role: string;
+  employeeId?: string;
+  discount?: number;
+  discountType?: "flat" | "percent";
+  totalAmount?: number;
+  totalProfit?: number;
+  date?: any;
+  returns?: ReturnRecord[];
+  ownerId?: string;
+  branchId?: string;
+}
+
+interface ReturnRecord {
+  itemId: string;
+  itemName: string;
+  quantity: number;
+  amount: number;
+  profit: number;
+  returnedAt: string;
+  returnedBy: string;
+  returnedByRole: string;
+  saleId: string;
+  branchId: string;
+  ownerId: string;
+}
+
+interface CurrencyOption {
+  symbol: string;
+  code: string;
+  name: string;
+  flag: string;
+}
+
+interface ToastMessage {
+  type: 'success' | 'error' | 'warning' | 'info';
+  title: string;
+  message: string;
+}
+
+interface OfflineSale {
+  ownerId: string | null;
+  branchId: string | undefined;
+  createdBy: string | undefined;
+  role: "owner" | "employee" | undefined;
+  items: CartItem[];
+  discount: number;
+  discountType: "flat" | "percent";
+  totalAmount: number;
+  totalProfit: number;
+  currency: string;
+  currencySymbol: string;
+  date: any;
+  returns: any[];
+  employeeId?: string | null;
+  localId?: number;
+}
+
+export default function Sales() {
+  const { activeBranch } = useBranch();
+
+  const [ownerId, setOwnerId] = useState<string | null>(null);
+  const [employeeId, setEmployeeId] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isOffline, setIsOffline] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [isReturnProcessing, setIsReturnProcessing] = useState(false);
+  const [toast, setToast] = useState<ToastMessage | null>(null);
+
+  const [products, setProducts] = useState<Product[]>([]);
+  const [sales, setSales] = useState<Sale[]>([]);
+
+  const [productId, setProductId] = useState("");
+  const [qty, setQty] = useState("");
+  const [selectedPrice, setSelectedPrice] = useState<number | null>(null);
+  
+  // Debounced search
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+
+  const [cart, setCart] = useState<CartItem[]>([]);
+  const [discount, setDiscount] = useState(0);
+  const [discountType, setDiscountType] = useState<"flat" | "percent">("flat");
+
+  const [returnQty, setReturnQty] = useState<{ [key: string]: number }>({});
+  const [editingSale, setEditingSale] = useState<string | null>(null);
+  const [confirmSale, setConfirmSale] = useState(false);
+  const [showRecentSales, setShowRecentSales] = useState(false);
+
+  const [currentUser, setCurrentUser] = useState<{ name: string; role: "owner" | "employee" } | null>(null);
+  
+  // Currency state
+  const [currency, setCurrency] = useState<CurrencyOption>({
+    symbol: "$",
+    code: "USD",
+    name: "US Dollar",
+    flag: "🇺🇸"
+  });
+
+  // Refs to prevent unnecessary effects
+  const initialLoadDone = useRef(false);
+  const syncInProgress = useRef(false);
+
+  // Currency list
+  const currencies: CurrencyOption[] = [
+    { symbol: "₨", code: "PKR", name: "Pakistani Rupee", flag: "🇵🇰" },
+    { symbol: "$", code: "USD", name: "US Dollar", flag: "🇺🇸" },
+    { symbol: "€", code: "EUR", name: "Euro", flag: "🇪🇺" },
+    { symbol: "£", code: "GBP", name: "British Pound", flag: "🇬🇧" },
+    { symbol: "¥", code: "JPY", name: "Japanese Yen", flag: "🇯🇵" },
+    { symbol: "₩", code: "KRW", name: "South Korean Won", flag: "🇰🇷" },
+    { symbol: "₱", code: "PHP", name: "Philippine Peso", flag: "🇵🇭" },
+    { symbol: "₦", code: "NGN", name: "Nigerian Naira", flag: "🇳🇬" },
+    { symbol: "₪", code: "ILS", name: "Israeli Shekel", flag: "🇮🇱" },
+    { symbol: "₫", code: "VND", name: "Vietnamese Dong", flag: "🇻🇳" },
+  ];
+
+  // Debug logs wrapped
+  useEffect(() => {
+    if (DEBUG) console.log('Return quantities updated:', returnQty);
+  }, [returnQty]);
+
+  // Auto-hide toast after 3 seconds
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => {
+        setToast(null);
+      }, 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [toast]);
+
+  const showToast = (type: 'success' | 'error' | 'warning' | 'info', title: string, message: string) => {
+    setToast({ type, title, message });
+  };
+
+  // Debounce search input
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(productId);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [productId]);
+
+  /* ---------------- ONLINE / OFFLINE DETECTION & SYNC ---------------- */
+  useEffect(() => {
+    const updateStatus = () => {
+      setIsOffline(!navigator.onLine);
+    };
+
+    updateStatus();
+    window.addEventListener("online", updateStatus);
+    window.addEventListener("offline", updateStatus);
+
+    return () => {
+      window.removeEventListener("online", updateStatus);
+      window.removeEventListener("offline", updateStatus);
+    };
+  }, []);
+
+  // Auto-sync offline sales when online
+  useEffect(() => {
+    const syncOfflineSales = async () => {
+      if (!isOffline && ownerId && activeBranch?.id && !syncInProgress.current) {
+        syncInProgress.current = true;
+        try {
+          const offlineSalesJson = localStorage.getItem("offlineSales");
+          if (!offlineSalesJson) {
+            syncInProgress.current = false;
+            return;
+          }
+
+          const offlineSales: OfflineSale[] = JSON.parse(offlineSalesJson);
+          if (offlineSales.length === 0) {
+            syncInProgress.current = false;
+            return;
+          }
+
+          showToast("info", "Syncing", `Syncing ${offlineSales.length} offline sales...`);
+
+          for (const sale of offlineSales) {
+            try {
+              const saleData = { ...sale };
+              delete saleData.localId;
+              saleData.date = serverTimestamp();
+              
+              await addDoc(collection(db, "sales"), saleData);
+            } catch (err) {
+              if (DEBUG) console.error("Error syncing offline sale:", err);
+            }
+          }
+
+          localStorage.removeItem("offlineSales");
+          showToast("success", "Sync Complete", "All offline sales have been synced");
+        } catch (err) {
+          if (DEBUG) console.error("Error in sync process:", err);
+        } finally {
+          syncInProgress.current = false;
+        }
+      }
+    };
+
+    syncOfflineSales();
+  }, [isOffline, ownerId, activeBranch?.id]);
+
+  /* ---------------- LOAD USER CURRENCY ---------------- */
+  useEffect(() => {
+    const loadUserCurrency = async (userId: string) => {
+      try {
+        const userDoc = await getDoc(doc(db, "users", userId));
+        if (userDoc.exists()) {
+          const userData = userDoc.data();
+          if (userData.currency) {
+            const savedCurrency = currencies.find(c => c.code === userData.currency);
+            if (savedCurrency) {
+              setCurrency(savedCurrency);
+            }
+          }
+        }
+      } catch (error) {
+        if (DEBUG) console.error("Error loading currency:", error);
+      }
+    };
+
+    if (ownerId) {
+      loadUserCurrency(ownerId);
+    }
+  }, [ownerId]);
+
+  // Detect logged user
+  useEffect(() => {
+    const unsub = auth.onAuthStateChanged(async (user) => {
+      if (!user) {
+        setIsLoading(false);
+        return;
+      }
+
+      const uid = user.uid;
+      let found = false;
+
+      try {
+        const userDoc = await getDoc(doc(db, "users", uid));
+        if (userDoc.exists()) {
+          const data = userDoc.data();
+          setOwnerId(uid);
+          setCurrentUser({ name: data.name, role: "owner" });
+          found = true;
+        }
+
+        if (!found) {
+          const empDoc = await getDoc(doc(db, "allEmployees", uid));
+          if (empDoc.exists()) {
+            const emp = empDoc.data();
+            setOwnerId(emp.ownerId);
+            setEmployeeId(uid);
+            setCurrentUser({ name: emp.name, role: "employee" });
+            found = true;
+          }
+        }
+      } catch (error) {
+        if (DEBUG) console.error("Error loading user:", error);
+      }
+      
+      setIsLoading(false);
+    });
+
+    return () => unsub();
+  }, []);
+
+  // Load products with cache for instant load
+  useEffect(() => {
+    if (!activeBranch?.id || !ownerId || isLoading) return;
+
+    // Load from cache instantly
+    const cached = localStorage.getItem("products_cache");
+    if (cached) {
+      try {
+        setProducts(JSON.parse(cached));
+      } catch (e) {
+        if (DEBUG) console.error("Error parsing products cache:", e);
+      }
+    }
+
+    const q = query(
+      collection(db, "products"),
+      where("ownerId", "==", ownerId),
+      where("branchId", "==", activeBranch.id)
+    );
+
+    const unsub = onSnapshot(q, (snap) => {
+      const list: Product[] = snap.docs.map((d) => ({
+        id: d.id,
+        name: d.data().name,
+        qty: d.data().qty,
+        saleRate: d.data().saleRate,
+        profit: d.data().profit,
+        purchaseRate: d.data().purchaseRate,
+        allowSale: d.data().allowSale,
+      }));
+      setProducts(list);
+      
+      // Update cache
+      localStorage.setItem("products_cache", JSON.stringify(list));
+    });
+
+    return () => unsub();
+  }, [ownerId, activeBranch?.id, isLoading]);
+
+  // Load sales with LIMIT for better performance
+  useEffect(() => {
+    if (!activeBranch?.id || !ownerId || isLoading) return;
+
+    if (DEBUG) console.log("Loading sales for owner:", ownerId, "branch:", activeBranch.id);
+
+    const q = query(
+      collection(db, "sales"),
+      where("ownerId", "==", ownerId),
+      where("branchId", "==", activeBranch.id),
+      orderBy("date", "desc"),
+      limit(20) // 🔥 Only load recent 20 for performance
+    );
+
+    const unsub = onSnapshot(q, (snap) => {
+      if (DEBUG) console.log("Sales snapshot received, count:", snap.docs.length);
+      
+      const list: Sale[] = snap.docs
+        .map((d) => {
+          const data = d.data();
+          if (DEBUG) console.log("Sale document:", d.id, data);
+          
+          return {
+            id: d.id,
+            items: data.items || [],
+            createdBy: data.createdBy || 'Unknown',
+            role: data.role || 'unknown',
+            employeeId: data.employeeId,
+            discount: data.discount || 0,
+            discountType: data.discountType || "flat",
+            totalAmount: data.totalAmount || 0,
+            totalProfit: data.totalProfit || 0,
+            date: data.date,
+            returns: data.returns || [],
+            ownerId: data.ownerId,
+            branchId: data.branchId,
+          };
+        })
+        .filter((s) => s.items && s.items.length > 0);
+
+      if (DEBUG) console.log("Processed sales:", list);
+      setSales(list);
+    }, (error) => {
+      if (DEBUG) console.error("Error loading sales:", error);
+    });
+
+    return () => unsub();
+  }, [ownerId, activeBranch?.id, isLoading]);
+
+  // Memoized search results using debounced search
+  const searchResults = useMemo(() => {
+    if (!debouncedSearch) return [];
+    return products
+      .filter(p => p.name.toLowerCase().includes(debouncedSearch.toLowerCase()) && p.allowSale)
+      .slice(0, 10);
+  }, [products, debouncedSearch]);
+
+  // Memoized calculations
+  const totals = useMemo(() => {
+    const totalPrice = cart.reduce((sum, c) => sum + c.price * c.qty, 0);
+    const totalProfit = cart.reduce((sum, c) => sum + c.profit * c.qty, 0);
+    
+    let discountAmount = discount;
+    if (discountType === "percent") discountAmount = (totalPrice * discount) / 100;
+
+    const maxDiscount = Math.min(totalPrice, totalProfit);
+    const validatedDiscountAmount = Math.min(discountAmount, maxDiscount);
+    
+    return {
+      totalPrice,
+      totalProfit,
+      discountAmount: validatedDiscountAmount,
+      finalPrice: totalPrice - validatedDiscountAmount,
+      finalProfit: totalProfit - validatedDiscountAmount,
+      maxDiscount
+    };
+  }, [cart, discount, discountType]);
+
+  // Add to cart - memoized
+  const addToCart = useCallback(() => {
+    const product = products.find((p) => p.name.toLowerCase() === productId.toLowerCase());
+    if (!product) {
+      showToast('error', 'Product Not Found', 'Please check the product name and try again');
+      return;
+    }
+
+    const quantity = Number(qty);
+    if (quantity <= 0) {
+      showToast('error', 'Invalid Quantity', 'Please enter a valid quantity');
+      return;
+    }
+    if (quantity > product.qty) {
+      showToast('error', 'Insufficient Stock', `Maximum available stock: ${product.qty}`);
+      return;
+    }
+    if (!product.allowSale) {
+      showToast('error', 'Product Not Available', 'This product cannot be sold');
+      return;
+    }
+    
+    const itemProfit = product.profit * quantity;
+    if (itemProfit < 0) {
+      showToast('warning', 'Negative Profit', 'This product has negative profit and cannot be sold');
+      return;
+    }
+
+    setCart((prev) => {
+      const existing = prev.find((c) => c.id === product.id);
+      if (existing) {
+        if (existing.qty + quantity > product.qty) {
+          showToast('error', 'Stock Limit', `Cannot exceed stock: ${product.qty}`);
+          return prev;
+        }
+        showToast('success', 'Cart Updated', `${quantity} more ${product.name} added to cart`);
+        return prev.map((c) =>
+          c.id === product.id ? { ...c, qty: c.qty + quantity } : c
+        );
+      }
+      showToast('success', 'Item Added', `${product.name} added to cart`);
+      return [...prev, { 
+        id: product.id, 
+        name: product.name, 
+        qty: quantity, 
+        price: product.saleRate, 
+        profit: product.profit,
+        purchaseRate: product.purchaseRate 
+      }];
+    });
+
+    setProductId("");
+    setQty("");
+    setSelectedPrice(null);
+  }, [products, productId, qty]);
+
+  const removeFromCart = useCallback((id: string) => {
+    const item = cart.find(c => c.id === id);
+    if (item) {
+      showToast('info', 'Item Removed', `${item.name} removed from cart`);
+    }
+    setCart((prev) => prev.filter((c) => c.id !== id));
+  }, [cart]);
+
+  const updateCartQty = useCallback((id: string, newQty: number) => {
+    const product = products.find((p) => p.id === id);
+    if (!product) return;
+
+    if (newQty <= 0) return removeFromCart(id);
+    if (newQty > product.qty) {
+      showToast('error', 'Stock Limit', `Maximum available stock: ${product.qty}`);
+      return;
+    }
+
+    setCart((prev) => prev.map((c) => (c.id === id ? { ...c, qty: newQty } : c)));
+  }, [products, removeFromCart]);
+
+  // Complete Sale with offline support
+  const makeSale = useCallback(async () => {
+    if (cart.length === 0) {
+      showToast('error', 'Empty Cart', 'Please add items to cart first');
+      return;
+    }
+    
+    if (totals.finalProfit < 0) {
+      showToast('error', 'Negative Profit', 'Cannot complete sale: Profit would be negative after discount');
+      return;
+    }
+
+    setIsProcessing(true);
+    setConfirmSale(false);
+
+    try {
+      // If offline, save to localStorage
+      if (isOffline) {
+        const offlineSalesJson = localStorage.getItem("offlineSales");
+        const offlineSales: OfflineSale[] = offlineSalesJson ? JSON.parse(offlineSalesJson) : [];
+
+        const saleData: OfflineSale = {
+          ownerId,
+          branchId: activeBranch?.id,
+          createdBy: currentUser?.name,
+          role: currentUser?.role,
+          items: cart,
+          discount: totals.discountAmount,
+          discountType,
+          totalAmount: totals.finalPrice,
+          totalProfit: totals.finalProfit,
+          currency: currency.code,
+          currencySymbol: currency.symbol,
+          date: new Date().toISOString(),
+          returns: [],
+          localId: Date.now(),
+        };
+
+        if (currentUser?.role === 'employee' && employeeId) {
+          saleData.employeeId = employeeId;
+        }
+
+        offlineSales.push(saleData);
+        localStorage.setItem("offlineSales", JSON.stringify(offlineSales));
+
+        setCart([]);
+        setDiscount(0);
+        setDiscountType("flat");
+        
+        showToast('info', 'Saved Offline', 'Sale saved. Will sync when online.');
+        setIsProcessing(false);
+        return;
+      }
+
+      // Online - use Promise.all with increment for better performance
+      const updates = cart.map(async (item) => {
+        const productRef = doc(db, "products", item.id);
+        // Use increment instead of read + update
+        await updateDoc(productRef, { 
+          qty: increment(-item.qty) 
+        });
+      });
+
+      await Promise.all(updates);
+
+      // Create sale object with all necessary fields
+      const saleData: any = {
+        ownerId,
+        branchId: activeBranch?.id,
+        createdBy: currentUser?.name,
+        role: currentUser?.role,
+        items: cart,
+        discount: totals.discountAmount,
+        discountType,
+        totalAmount: totals.finalPrice,
+        totalProfit: totals.finalProfit,
+        currency: currency.code,
+        currencySymbol: currency.symbol,
+        date: serverTimestamp(),
+        returns: [],
+      };
+
+      // Add employeeId if the user is an employee
+      if (currentUser?.role === 'employee' && employeeId) {
+        saleData.employeeId = employeeId;
+      }
+
+      await addDoc(collection(db, "sales"), saleData);
+
+      setCart([]);
+      setDiscount(0);
+      setDiscountType("flat");
+      
+      showToast('success', 'Sale Completed!', `Total amount: ${currency.symbol}${formatCurrency(totals.finalPrice)}`);
+    } catch (err) {
+      if (DEBUG) console.error(err);
+      showToast('error', 'Sale Failed', err instanceof Error ? err.message : 'An unknown error occurred');
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [cart, totals, isOffline, ownerId, activeBranch?.id, currentUser, employeeId, currency, discountType]);
+
+  // Return Item - memoized
+  const returnItem = useCallback(async (sale: Sale, item: CartItem) => {
+    if (DEBUG) console.log("=== RETURN ATTEMPT START ===");
+    if (DEBUG) console.log("Sale from state:", sale);
+    if (DEBUG) console.log("Item:", item);
+    
+    // Get current user and ensure we have ownerId
+    const user = auth.currentUser;
+    if (!user) {
+      if (DEBUG) console.log("No authenticated user");
+      showToast('error', 'Authentication Error', 'Please log in again');
+      return;
+    }
+
+    // Ensure we have ownerId and branchId
+    if (!ownerId || !activeBranch?.id) {
+      if (DEBUG) console.log("Missing configuration:", { ownerId, branchId: activeBranch?.id });
+      showToast('error', 'Configuration Error', 'Missing owner or branch information');
+      return;
+    }
+
+    // Ensure we have current user info
+    if (!currentUser) {
+      if (DEBUG) console.log("No current user info");
+      showToast('error', 'User Error', 'Could not identify current user');
+      return;
+    }
+
+    const key = `${sale.id}_${item.id}`;
+    const qtyReturn = returnQty[key];
+    
+    if (DEBUG) console.log('Return quantity:', { key, qtyReturn, availableQty: item.qty });
+    
+    // Validate return quantity
+    if (!qtyReturn || qtyReturn <= 0) {
+      showToast('error', 'Invalid Quantity', 'Please enter a valid return quantity');
+      return;
+    }
+    
+    if (qtyReturn > item.qty) {
+      showToast('error', 'Exceeds Sold Quantity', `Cannot return more than ${item.qty} items`);
+      return;
+    }
+    
+    const returnProfit = item.profit * qtyReturn;
+    
+    // Check if return would cause negative profit
+    const currentTotalProfit = sale.totalProfit || 0;
+    if ((currentTotalProfit - returnProfit) < 0) {
+      const confirmNegative = window.confirm(
+        `Warning: This return will result in negative profit for this sale (${currency.symbol}${formatCurrency(currentTotalProfit - returnProfit)}). Continue anyway?`
+      );
+      if (!confirmNegative) return;
+    }
+
+    setIsReturnProcessing(true);
+
+    try {
+      if (DEBUG) console.log("Starting transaction...");
+      
+      await runTransaction(db, async (transaction) => {
+        // Get references
+        const saleRef = doc(db, "sales", sale.id);
+        const productRef = doc(db, "products", item.id);
+        
+        if (DEBUG) console.log("Getting sale document:", sale.id);
+        // Get the sale document
+        const saleSnap = await transaction.get(saleRef);
+        if (!saleSnap.exists()) {
+          throw new Error("Sale record not found");
+        }
+        
+        const saleData = saleSnap.data();
+        if (DEBUG) console.log("Sale data from DB:", saleData);
+        
+        // Verify the sale belongs to this owner's business
+        if (!saleData.ownerId) {
+          if (DEBUG) console.log("ERROR: Sale has no ownerId field!");
+          throw new Error("Sale record is missing owner information");
+        }
+        
+        if (currentUser?.role === "employee") {
+          // Employee can only return their own sale
+          if (saleData.employeeId !== employeeId) {
+            throw new Error("You don't have permission to modify this sale");
+          }
+        } else if (currentUser?.role === "owner") {
+          // Owner can return any sale in their store
+          if (saleData.ownerId !== ownerId) {
+            throw new Error("This sale does not belong to your store");
+          }
+        }
+        
+        if (DEBUG) console.log("Getting product document:", item.id);
+        // Get the product document
+        const productSnap = await transaction.get(productRef);
+        if (!productSnap.exists()) {
+          throw new Error("Product not found in inventory");
+        }
+        
+        const productData = productSnap.data();
+        if (DEBUG) console.log("Product data from DB:", productData);
+        
+        // Verify product belongs to correct branch
+        if (productData.branchId !== activeBranch.id) {
+          if (DEBUG) console.log("Branch mismatch:", { 
+            productBranch: productData.branchId, 
+            activeBranch: activeBranch.id 
+          });
+          throw new Error("Product belongs to a different branch");
+        }
+        
+        // Update items array
+        const items = [...(saleData.items || [])];
+        const itemIndex = items.findIndex((i: any) => i.id === item.id);
+        
+        if (itemIndex === -1) {
+          throw new Error("Item not found in sale");
+        }
+        
+        // Store original item for calculations
+        const originalItem = items[itemIndex];
+        if (DEBUG) console.log("Original item:", originalItem);
+        
+        // Calculate return amounts
+        const returnAmount = originalItem.price * qtyReturn;
+        const returnProfitAmount = originalItem.profit * qtyReturn;
+        
+        if (DEBUG) console.log("Return calculations:", { returnAmount, returnProfitAmount });
+        
+        // Update quantity or remove item
+        if (originalItem.qty === qtyReturn) {
+          // Remove item completely
+          items.splice(itemIndex, 1);
+        } else {
+          // Reduce quantity
+          items[itemIndex] = {
+            ...originalItem,
+            qty: originalItem.qty - qtyReturn
+          };
+        }
+        
+        // Calculate new totals
+        const newTotalAmount = (saleData.totalAmount || 0) - returnAmount;
+        const newTotalProfit = (saleData.totalProfit || 0) - returnProfitAmount;
+        
+        if (DEBUG) console.log("New totals:", { newTotalAmount, newTotalProfit });
+        
+        // Update product stock
+        const currentStock = productData.qty || 0;
+        if (DEBUG) console.log("Updating product stock:", { 
+          currentStock, 
+          addStock: qtyReturn, 
+          newStock: currentStock + qtyReturn 
+        });
+        
+        transaction.update(productRef, { 
+          qty: increment(qtyReturn) 
+        });
+        
+        // Create return record
+        const returnRecord = {
+          itemId: item.id,
+          itemName: item.name,
+          quantity: qtyReturn,
+          amount: returnAmount,
+          profit: returnProfitAmount,
+          returnedAt: new Date().toISOString(),
+          returnedBy: currentUser?.name || 'Unknown',
+          returnedByRole: currentUser?.role || 'unknown',
+          saleId: sale.id,
+          branchId: activeBranch.id,
+          ownerId: ownerId
+        };
+        
+        if (DEBUG) console.log("Return record:", returnRecord);
+        
+        // Update sale record
+        const updates: any = {
+          items: items,
+          totalAmount: newTotalAmount,
+          totalProfit: newTotalProfit,
+        };
+        
+        // Only add returns array if it exists or create new one
+        if (saleData.returns) {
+          updates.returns = [...saleData.returns, returnRecord];
+        } else {
+          updates.returns = [returnRecord];
+        }
+        
+        if (DEBUG) console.log("Updating sale with:", updates);
+        transaction.update(saleRef, updates);
+      });
+
+      if (DEBUG) console.log("Transaction completed successfully");
+      
+      // Clear the return quantity for this item
+      setReturnQty((prev) => {
+        const newState = { ...prev };
+        delete newState[key];
+        return newState;
+      });
+      
+      showToast('success', 'Return Completed', 
+        `Successfully returned ${qtyReturn} ${item.name}`
+      );
+      
+    } catch (err) {
+      if (DEBUG) console.error("Return error:", err);
+      showToast('error', 'Return Failed', 
+        err instanceof Error ? err.message : 'An unknown error occurred'
+      );
+    } finally {
+      setIsReturnProcessing(false);
+      if (DEBUG) console.log("=== RETURN ATTEMPT END ===");
+    }
+  }, [ownerId, activeBranch?.id, currentUser, employeeId, currency, returnQty]);
+
+  const getInitials = (name: string) =>
+    name
+      .split(" ")
+      .map((n) => n[0])
+      .join("")
+      .toUpperCase()
+      .slice(0, 2);
+
+  const formatCurrency = (amount: number) => {
+    return new Intl.NumberFormat('en-US', {
+      maximumFractionDigits: 0,
+      minimumFractionDigits: 0,
+    }).format(amount);
+  };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-4 border-gray-900 border-t-transparent mx-auto mb-4"></div>
+          <p className="text-gray-600 font-medium">Loading Sales POS...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
+      {/* Toast Notification */}
+      {toast && (
+        <div className="fixed top-4 right-4 z-50 animate-slide-in">
+          <div className={`rounded-2xl shadow-2xl p-4 max-w-md backdrop-blur-xl border ${
+            toast.type === 'success' ? 'bg-green-50 border-green-200' :
+            toast.type === 'error' ? 'bg-red-50 border-red-200' :
+            toast.type === 'warning' ? 'bg-orange-50 border-orange-200' :
+            'bg-blue-50 border-blue-200'
+          }`}>
+            <div className="flex items-start gap-3">
+              <div className={`text-2xl ${
+                toast.type === 'success' ? 'text-green-600' :
+                toast.type === 'error' ? 'text-red-600' :
+                toast.type === 'warning' ? 'text-orange-600' :
+                'text-blue-600'
+              }`}>
+                {toast.type === 'success' ? '✅' :
+                 toast.type === 'error' ? '❌' :
+                 toast.type === 'warning' ? '⚠️' : 'ℹ️'}
+              </div>
+              <div className="flex-1">
+                <h3 className={`font-bold ${
+                  toast.type === 'success' ? 'text-green-800' :
+                  toast.type === 'error' ? 'text-red-800' :
+                  toast.type === 'warning' ? 'text-orange-800' :
+                  'text-blue-800'
+                }`}>{toast.title}</h3>
+                <p className={`text-sm mt-1 ${
+                  toast.type === 'success' ? 'text-green-600' :
+                  toast.type === 'error' ? 'text-red-600' :
+                  toast.type === 'warning' ? 'text-orange-600' :
+                  'text-blue-600'
+                }`}>{toast.message}</p>
+              </div>
+              <button
+                onClick={() => setToast(null)}
+                className="text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Processing Overlay */}
+      {(isProcessing || isReturnProcessing) && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[60]">
+          <div className="bg-white rounded-2xl p-8 shadow-2xl text-center">
+            <div className="animate-spin rounded-full h-16 w-16 border-4 border-gray-900 border-t-transparent mx-auto mb-4"></div>
+            <p className="text-lg font-semibold text-gray-900">
+              {isProcessing ? 'Processing Sale...' : 'Processing Return...'}
+            </p>
+            <p className="text-sm text-gray-500 mt-2">Please wait</p>
+          </div>
+        </div>
+      )}
+
+      {/* Header */}
+      <header className="bg-gradient-to-b from-gray-900 via-gray-900/95 to-gray-900/90 text-white shadow-2xl backdrop-blur-2xl border-b border-white/10 sticky top-0 z-50">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between py-4 sm:py-5 gap-3">
+            <div className="flex items-center gap-3">
+              <Link href="/owner-dashboard" className="relative group">
+                <Image
+                  src="/stockaro-logo.png"
+                  alt="Stockaroo"
+                  width={40}
+                  height={40}
+                  className="w-10 h-10 sm:w-11 sm:h-11 object-contain rounded-xl shadow-lg group-hover:scale-110 transition-all duration-300"
+                  priority
+                />
+              </Link>
+              <div>
+                <h1 className="text-xl sm:text-2xl font-bold tracking-tight bg-gradient-to-r from-white via-gray-100 to-gray-200 bg-clip-text text-transparent">
+                  Sales POS
+                </h1>
+                <p className="text-sm text-gray-300">
+                  {activeBranch?.shopName || "Select Branch"}
+                </p>
+              </div>
+            </div>
+            
+            {/* Dashboard Link */}
+            <Link 
+              href="/owner-dashboard"
+              className="flex items-center gap-2 bg-white/10 hover:bg-white/20 backdrop-blur-xl px-4 py-2 rounded-xl border border-white/30 hover:border-white/50 text-white font-semibold text-sm shadow-xl transition-all duration-300"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+              </svg>
+              <span>Dashboard</span>
+            </Link>
+
+            <div className="flex items-center gap-3 w-full sm:w-auto justify-between sm:justify-end">
+              {currentUser && (
+                <div className="flex items-center gap-2 bg-white/10 backdrop-blur-xl px-4 py-2 rounded-xl border border-white/20">
+                  <div className="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center font-bold text-white">
+                    {getInitials(currentUser.name)}
+                  </div>
+                  <div className="text-sm">
+                    <div className="font-semibold">{currentUser.name}</div>
+                    <div className="text-xs text-gray-300 capitalize">{currentUser.role}</div>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center gap-2 bg-white/10 backdrop-blur-xl px-4 py-2 rounded-xl border border-white/20">
+                <span className="text-lg">{currency.flag}</span>
+                <span className="font-bold">{currency.symbol}</span>
+                <span className="text-xs text-gray-300">{currency.code}</span>
+              </div>
+
+              {isOffline && (
+                <div className="bg-white/10 backdrop-blur-xl border border-white/30 text-white/90 text-sm px-4 py-2 rounded-xl font-semibold shadow-xl animate-pulse">
+                  📴 Offline
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          {/* Left Column - POS Interface */}
+          <div className="space-y-6">
+            {/* Product Search Card */}
+            <div className="bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border border-gray-200/60 p-6">
+              <h2 className="text-xl font-bold text-gray-900 mb-4">Add Items</h2>
+              
+              <div className="space-y-4">
+                <div className="relative">
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    Search Product
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Type to search..."
+                    className="w-full px-4 py-3 rounded-xl border border-gray-300 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 outline-none transition-all duration-300 text-gray-900 placeholder-gray-400"
+                    value={productId}
+                    onChange={(e) => setProductId(e.target.value)}
+                  />
+                  
+                  {debouncedSearch && searchResults.length > 0 && (
+                    <div className="absolute z-50 w-full mt-2 bg-white rounded-xl shadow-2xl border border-gray-200 max-h-60 overflow-y-auto">
+                      {searchResults.map(p => (
+                        <div
+                          key={p.id}
+                          className="p-3 hover:bg-gray-50 cursor-pointer border-b border-gray-100 last:border-0 transition-colors"
+                          onClick={() => {
+                            setProductId(p.name);
+                            setSelectedPrice(p.saleRate);
+                          }}
+                        >
+                          <div className="font-medium text-gray-900">{p.name}</div>
+                          <div className="text-xs text-gray-500 mt-1">
+                            Stock: {p.qty} | Rate: {currency.symbol}{p.saleRate}
+                            {p.profit < 0 && (
+                              <span className="ml-2 text-red-500">⚠️ Negative Profit</span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {selectedPrice && (
+                  <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
+                    <div className="text-sm text-gray-600">Selected Price:</div>
+                    <div className="text-2xl font-bold text-gray-900">
+                      {currency.symbol}{formatCurrency(selectedPrice)}
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    Quantity
+                  </label>
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    placeholder="0"
+                    className="w-full px-4 py-4 rounded-xl border border-gray-300 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 outline-none transition-all duration-300 text-2xl text-center font-bold text-gray-900"
+                    value={qty}
+                    onChange={(e) => setQty(e.target.value)}
+                  />
+                </div>
+
+                <button
+                  onClick={addToCart}
+                  disabled={isProcessing}
+                  className="w-full bg-gradient-to-r from-gray-900 to-gray-800 hover:from-gray-800 hover:to-gray-700 text-white font-bold py-4 px-6 rounded-xl shadow-xl hover:shadow-2xl transition-all duration-300 transform hover:scale-[1.02] active:scale-[0.98] text-lg disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
+                >
+                  {isProcessing ? 'Processing...' : 'Add to Cart ➕'}
+                </button>
+              </div>
+            </div>
+
+            {/* Cart Section */}
+            <div className="bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border border-gray-200/60 p-6">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-xl font-bold text-gray-900">Current Cart</h2>
+                <span className="bg-gray-900 text-white px-3 py-1 rounded-full text-sm font-semibold">
+                  {cart.length} items
+                </span>
+              </div>
+
+              {cart.length === 0 ? (
+                <div className="text-center py-12">
+                  <div className="text-6xl mb-4">🛒</div>
+                  <p className="text-gray-400 font-medium">Cart is empty</p>
+                </div>
+              ) : (
+                <div className="space-y-3 max-h-96 overflow-y-auto pr-2">
+                  {cart.map((c) => (
+                    <div key={c.id} className="bg-gray-50 p-4 rounded-xl border border-gray-200 hover:border-gray-300 transition-all duration-300">
+                      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                        <div className="flex-1">
+                          <div className="font-semibold text-gray-900">{c.name}</div>
+                          <div className="text-sm text-gray-600 mt-1">
+                            {currency.symbol}{c.price} × {c.qty} = <span className="font-bold text-gray-900">{currency.symbol}{formatCurrency(c.price * c.qty)}</span>
+                          </div>
+                          <div className="text-xs text-green-600 mt-1">
+                            Profit: {currency.symbol}{formatCurrency(c.profit * c.qty)}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 w-full sm:w-auto">
+                          <input
+                            type="number"
+                            inputMode="numeric"
+                            className="w-20 border border-gray-300 rounded-lg text-center p-2 text-lg focus:ring-1 focus:ring-gray-900 outline-none"
+                            value={c.qty}
+                            onChange={(e) => updateCartQty(c.id, Number(e.target.value))}
+                            disabled={isProcessing}
+                          />
+                          <button
+                            onClick={() => removeFromCart(c.id)}
+                            disabled={isProcessing}
+                            className="bg-red-100 text-red-600 p-2 rounded-lg hover:bg-red-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            aria-label="Remove item"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Right Column - Checkout & Summary */}
+          <div className="space-y-6">
+            <div className="bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border border-gray-200/60 p-6">
+              <h2 className="text-xl font-bold text-gray-900 mb-4">Discount</h2>
+              <div className="flex gap-3">
+                <select
+                  className="w-1/3 px-4 py-3 rounded-xl border border-gray-300 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 outline-none transition-all duration-300 text-gray-900 font-semibold bg-white"
+                  value={discountType}
+                  onChange={(e) => setDiscountType(e.target.value as "flat" | "percent")}
+                  disabled={isProcessing}
+                >
+                  <option value="flat">Flat ({currency.symbol})</option>
+                  <option value="percent">%</option>
+                </select>
+
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  placeholder="0"
+                  className="flex-1 px-4 py-3 rounded-xl border border-gray-300 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 outline-none transition-all duration-300 text-gray-900 text-lg font-semibold"
+                  value={discount}
+                  onChange={(e) => setDiscount(Number(e.target.value))}
+                  max={discountType === "flat" ? totals.maxDiscount : 100}
+                  disabled={isProcessing}
+                />
+              </div>
+              {discount > 0 && totals.discountAmount < (discountType === "flat" ? discount : (discount * totals.totalPrice / 100)) && (
+                <p className="text-xs text-orange-600 mt-2">
+                  ⚠️ Discount adjusted to {currency.symbol}{formatCurrency(totals.discountAmount)} to prevent negative profit
+                </p>
+              )}
+            </div>
+
+            <div className="bg-gradient-to-br from-gray-900 to-gray-800 text-white rounded-2xl shadow-2xl p-6">
+              <h2 className="text-xl font-bold mb-4">Order Summary</h2>
+              
+              <div className="space-y-3">
+                <div className="flex justify-between text-gray-300">
+                  <span>Subtotal</span>
+                  <span className="font-semibold">{currency.symbol}{formatCurrency(totals.totalPrice)}</span>
+                </div>
+                
+                {totals.discountAmount > 0 && (
+                  <div className="flex justify-between text-red-400">
+                    <span>Discount</span>
+                    <span className="font-semibold">-{currency.symbol}{formatCurrency(totals.discountAmount)}</span>
+                  </div>
+                )}
+                
+                <div className="flex justify-between text-2xl font-bold pt-4 border-t border-white/20">
+                  <span>Total</span>
+                  <span className="bg-gradient-to-r from-white to-gray-200 bg-clip-text text-transparent">
+                    {currency.symbol}{formatCurrency(totals.finalPrice)}
+                  </span>
+                </div>
+                
+                <div className="flex justify-between text-sm pt-2">
+                  <span className="text-green-400">Est. Profit</span>
+                  <span className={`font-semibold ${totals.finalProfit < 0 ? 'text-red-400' : 'text-green-400'}`}>
+                    {currency.symbol}{formatCurrency(totals.finalProfit)}
+                  </span>
+                </div>
+
+                {totals.finalProfit < 0 && (
+                  <div className="text-xs text-red-400 bg-red-400/10 p-2 rounded-lg">
+                    ⚠️ Warning: This sale will result in a loss
+                  </div>
+                )}
+              </div>
+
+              <button
+                onClick={() => setConfirmSale(true)}
+                disabled={cart.length === 0 || totals.finalProfit < 0 || isProcessing}
+                className={`w-full mt-6 py-4 rounded-xl font-bold text-lg shadow-xl transition-all duration-300 transform hover:scale-[1.02] active:scale-[0.98] ${
+                  cart.length === 0 || totals.finalProfit < 0 || isProcessing
+                    ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                    : 'bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white'
+                }`}
+              >
+                {isProcessing ? 'Processing...' : totals.finalProfit < 0 ? 'Cannot Complete (Negative Profit)' : 'Complete Sale'}
+              </button>
+            </div>
+
+            <button
+              onClick={() => setShowRecentSales(!showRecentSales)}
+              disabled={isProcessing}
+              className="w-full py-4 bg-white/90 backdrop-blur-xl hover:bg-white rounded-xl shadow-xl border border-gray-200/60 text-gray-900 font-semibold transition-all duration-300 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <span>{showRecentSales ? "📋" : "📜"}</span>
+              {showRecentSales ? "Hide Recent Sales" : "Show Recent Sales"}
+            </button>
+          </div>
+        </div>
+
+        {/* Recent Sales Section */}
+        {showRecentSales && (
+          <div className="mt-8 bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border border-gray-200/60 p-6 animate-fade-in">
+            <h2 className="text-2xl font-bold text-gray-900 mb-6">Recent Sales</h2>
+            
+            {sales.length === 0 ? (
+              <div className="text-center py-12">
+                <div className="text-6xl mb-4">📊</div>
+                <p className="text-gray-400 font-medium">No sales yet</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {sales.map((s) => (
+                  <div key={s.id} className="bg-gray-50 rounded-xl border border-gray-200 p-4 hover:border-gray-300 transition-all duration-300">
+                    <div className="flex justify-between items-start mb-3">
+                      <div className="font-semibold text-gray-900">
+                        #{s.id.slice(0, 8)}
+                      </div>
+                      <div className="text-xs text-gray-500">
+                        {s.date?.toDate?.().toLocaleString()}
+                      </div>
+                    </div>
+
+                    <div className="space-y-1 mb-3">
+                      {s.items && s.items.length > 0 ? (
+                        s.items.map((item, index) => (
+                          <div key={`${s.id}-${item.id}-${index}`} className="flex justify-between text-sm text-gray-700">
+                            <span>{item.name} x {item.qty}</span>
+                            <span className="font-medium">{currency.symbol}{formatCurrency(item.price * item.qty)}</span>
+                          </div>
+                        ))
+                      ) : (
+                        <p className="text-gray-400 text-sm">No items</p>
+                      )}
+                    </div>
+
+                    {s.discount && s.discount > 0 && (
+                      <div className="flex justify-between text-sm text-red-500 mb-2">
+                        <span>Discount ({s.discountType === "percent" ? "%" : "Flat"})</span>
+                        <span>-{s.discountType === "percent" ? `${s.discount}%` : `${currency.symbol}${s.discount}`}</span>
+                      </div>
+                    )}
+
+                    <div className="flex justify-between text-blue-600 font-bold text-lg mb-2">
+                      <span>Total</span>
+                      <span>{currency.symbol}{formatCurrency(s.totalAmount || 0)}</span>
+                    </div>
+
+                    <div className="flex justify-between mb-3">
+                      <span className="text-sm text-gray-600">Profit</span>
+                      <span className={`font-semibold ${(s.totalProfit || 0) < 0 ? 'text-red-600' : 'text-green-600'}`}>
+                        {currency.symbol}{formatCurrency(s.totalProfit || 0)}
+                      </span>
+                    </div>
+
+                    <div className="text-xs text-gray-400 mb-3">
+                      {s.createdBy} ({s.role})
+                      {s.employeeId && s.role === 'employee' && (
+                        <span className="ml-1 text-blue-500">(Employee)</span>
+                      )}
+                    </div>
+
+                    <button
+                      onClick={() => setEditingSale(editingSale === s.id ? null : s.id)}
+                      disabled={isReturnProcessing}
+                      className="w-full text-gray-600 text-sm font-semibold py-2 border border-gray-300 rounded-lg hover:bg-gray-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {editingSale === s.id ? "Close Edit" : "Edit / Return"}
+                    </button>
+
+                    {editingSale === s.id && (
+                      <div className="mt-3 pt-3 border-t border-gray-200 space-y-2">
+                        {s.items && s.items.map((item, index) => {
+                          const key = `${s.id}_${item.id}`;
+                          const currentReturnQty = returnQty[key] || '';
+                          
+                          return (
+                            <div key={key} className="flex flex-col sm:flex-row gap-2 items-center bg-white p-2 rounded-lg border border-gray-100">
+                              <span className="text-sm font-medium text-gray-700 w-full sm:w-1/2 truncate">
+                                {item.name}
+                              </span>
+                              <input
+                                type="number"
+                                inputMode="numeric"
+                                min={1}
+                                max={item.qty}
+                                value={currentReturnQty}
+                                onChange={(e) => {
+                                  let val = e.target.value === '' ? 0 : Number(e.target.value);
+                                  if (val > item.qty) val = item.qty;
+                                  if (val < 0) val = 0;
+                                  setReturnQty(prev => ({ 
+                                    ...prev, 
+                                    [key]: val 
+                                  }));
+                                }}
+                                placeholder={`Max: ${item.qty}`}
+                                className="border border-gray-300 rounded-lg p-2 text-center w-full sm:w-24 text-lg focus:ring-1 focus:ring-gray-900 outline-none"
+                                disabled={isReturnProcessing}
+                              />
+                              <button
+                                onClick={() => returnItem(s, item)}
+                                disabled={isReturnProcessing || !returnQty[key] || returnQty[key] <= 0}
+                                className={`px-4 py-2 rounded-lg font-semibold text-sm w-full sm:w-auto transition-colors flex items-center justify-center gap-2 ${
+                                  !returnQty[key] || returnQty[key] <= 0 || isReturnProcessing
+                                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                                    : 'bg-red-600 text-white hover:bg-red-700'
+                                }`}
+                              >
+                                {isReturnProcessing ? (
+                                  <>
+                                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                                    <span>Processing...</span>
+                                  </>
+                                ) : (
+                                  'Return'
+                                )}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </main>
+
+      {/* Confirmation Modal */}
+      {confirmSale && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl animate-in slide-in-from-bottom-4 duration-300">
+            <div className="text-center mb-6">
+              <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <svg className="w-8 h-8 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
+              <h3 className="text-xl font-bold text-gray-900">Complete Sale?</h3>
+              <p className="text-sm text-gray-500 mt-2">This action cannot be undone</p>
+            </div>
+            
+            <div className="bg-gray-50 rounded-xl p-4 mb-6">
+              <div className="flex justify-between mb-2">
+                <span className="text-gray-600">Total Amount</span>
+                <span className="text-2xl font-bold text-gray-900">{currency.symbol}{formatCurrency(totals.finalPrice)}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-600">Est. Profit</span>
+                <span className={`font-semibold ${totals.finalProfit < 0 ? 'text-red-600' : 'text-green-600'}`}>
+                  {currency.symbol}{formatCurrency(totals.finalProfit)}
+                </span>
+              </div>
+            </div>
+            
+            <div className="flex gap-3">
+              <button
+                onClick={() => setConfirmSale(false)}
+                className="flex-1 py-3 rounded-xl border border-gray-300 text-gray-700 font-semibold hover:bg-gray-50 transition-colors"
+                disabled={isProcessing}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { setConfirmSale(false); makeSale(); }}
+                className="flex-1 py-3 rounded-xl bg-gradient-to-r from-gray-900 to-gray-800 text-white font-semibold hover:from-gray-800 hover:to-gray-700 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={isProcessing}
+              >
+                {isProcessing ? 'Processing...' : 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <style jsx global>{`
+        @keyframes fade-in {
+          from { opacity: 0; transform: translateY(10px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .animate-fade-in {
+          animation: fade-in 0.3s ease-out;
+        }
+
+        @keyframes slide-in-from-bottom {
+          from { opacity: 0; transform: translateY(20px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .animate-in.slide-in-from-bottom-4 {
+          animation: slide-in-from-bottom 0.3s ease-out;
+        }
+
+        @keyframes slide-in {
+          from {
+            transform: translateX(100%);
+            opacity: 0;
+          }
+          to {
+            transform: translateX(0);
+            opacity: 1;
+          }
+        }
+        
+        .animate-slide-in {
+          animation: slide-in 0.3s ease-out;
+        }
+
+        .overflow-y-auto::-webkit-scrollbar {
+          width: 6px;
+        }
+        .overflow-y-auto::-webkit-scrollbar-track {
+          background: #f1f1f1;
+          border-radius: 10px;
+        }
+        .overflow-y-auto::-webkit-scrollbar-thumb {
+          background: #888;
+          border-radius: 10px;
+        }
+        .overflow-y-auto::-webkit-scrollbar-thumb:hover {
+          background: #555;
+        }
+      `}</style>
+    </div>
+  );
+}
