@@ -185,7 +185,7 @@ className="w-full bg-gradient-to-r from-gray-900 to-gray-700 hover:from-gray-800
 Don't have an account?
 
 <span
-onClick={()=>router.push("/signup")}
+onClick={()=>router.push("/signupp")}
 className="text-white ml-2 cursor-pointer hover:underline"
 >
 Create one

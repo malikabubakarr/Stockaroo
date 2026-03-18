@@ -57,7 +57,7 @@ interface OfflineSale {
   totalAmount: number;
   totalProfit: number;
   discount: number;
-  discountType: string;
+  discountType: "flat" | "percent";
   type: string;
   date: string;
   createdAt: string | any;
@@ -82,6 +82,10 @@ export default function EmployeeDashboard() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [showToast, setShowToast] = useState(false);
   const [toastMessage, setToastMessage] = useState({ title: "", message: "", type: "success" });
+  
+  // Discount state
+  const [discount, setDiscount] = useState(0);
+  const [discountType, setDiscountType] = useState<"flat" | "percent">("flat");
 
   // Refs
   const syncInProgress = useRef(false);
@@ -330,17 +334,44 @@ export default function EmployeeDashboard() {
     setCart(prev => prev.filter(item => item.id !== productId));
   }, [cart, showNotification]);
 
-  // Calculate totals (memoized)
+  // Calculate totals with discount (memoized)
   const totals = useMemo(() => {
-    const totalAmount = cart.reduce((sum, item) => sum + item.price * item.qty, 0);
+    const subtotal = cart.reduce((sum, item) => sum + item.price * item.qty, 0);
     const totalProfit = cart.reduce((sum, item) => sum + item.profit * item.qty, 0);
-    return { totalAmount, totalProfit };
-  }, [cart]);
+    
+    // Calculate discount amount
+    let discountAmount = 0;
+    if (discountType === "flat") {
+      discountAmount = Math.min(discount, subtotal);
+    } else {
+      discountAmount = (subtotal * discount) / 100;
+    }
+    
+    // Ensure discount doesn't exceed subtotal
+    discountAmount = Math.min(discountAmount, subtotal);
+    
+    // Calculate final amounts
+    const totalAmount = subtotal - discountAmount;
+    const finalProfit = totalProfit - discountAmount;
+
+    return { 
+      subtotal, 
+      totalProfit, 
+      discountAmount, 
+      totalAmount, 
+      finalProfit 
+    };
+  }, [cart, discount, discountType]);
 
   // Complete sale with offline support and spinner
   const completeSale = useCallback(async () => {
     if (cart.length === 0) {
       showNotification("Empty Cart", "Please add items to cart first", "error");
+      return;
+    }
+
+    if (totals.finalProfit < 0) {
+      showNotification("Negative Profit", "Discount would result in negative profit", "error");
       return;
     }
 
@@ -373,9 +404,9 @@ export default function EmployeeDashboard() {
           role: "employee",
           items: cart,
           totalAmount: totals.totalAmount,
-          totalProfit: totals.totalProfit,
-          discount: 0,
-          discountType: "flat",
+          totalProfit: totals.finalProfit,
+          discount: totals.discountAmount,
+          discountType,
           type: "employee_sale",
           date: new Date().toISOString(),
           createdAt: new Date().toISOString(),
@@ -387,8 +418,10 @@ export default function EmployeeDashboard() {
 
         showNotification("Saved Offline", "Sale saved. Will sync when online.", "info");
         
-        // Clear cart
+        // Clear cart and reset discount
         setCart([]);
+        setDiscount(0);
+        setDiscountType("flat");
         setIsProcessing(false);
         return;
       }
@@ -427,9 +460,9 @@ export default function EmployeeDashboard() {
           itemProfit: item.profit * item.qty
         })),
         totalAmount: totals.totalAmount,
-        totalProfit: totals.totalProfit,
-        discount: 0,
-        discountType: "flat",
+        totalProfit: totals.finalProfit,
+        discount: totals.discountAmount,
+        discountType,
         type: "employee_sale",
         date: serverTimestamp(),
         createdAt: serverTimestamp()
@@ -440,8 +473,10 @@ export default function EmployeeDashboard() {
 
       showNotification("Sale Completed!", `Total: ₨${formatCurrency(totals.totalAmount)}`, "success");
 
-      // Clear cart
+      // Clear cart and reset discount
       setCart([]);
+      setDiscount(0);
+      setDiscountType("flat");
 
       // Refresh products to show updated stock
       await loadProducts();
@@ -452,7 +487,7 @@ export default function EmployeeDashboard() {
     } finally {
       setIsProcessing(false);
     }
-  }, [cart, products, isOffline, ownerId, ownerName, branchId, branchName, employeeId, employeeName, totals, showNotification, loadProducts]);
+  }, [cart, products, isOffline, ownerId, ownerName, branchId, branchName, employeeId, employeeName, totals, discountType, showNotification, loadProducts]);
 
   const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat('en-PK', {
@@ -677,8 +712,41 @@ export default function EmployeeDashboard() {
                 </div>
               </div>
 
+              {/* Discount Section */}
+              {cart.length > 0 && (
+                <div className="mb-6 p-4 bg-gray-50 rounded-xl border border-gray-200">
+                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Apply Discount</h3>
+                  <div className="flex gap-2">
+                    <select
+                      value={discountType}
+                      onChange={(e) => setDiscountType(e.target.value as "flat" | "percent")}
+                      className="px-3 py-2 border border-gray-300 rounded-lg text-sm font-semibold bg-white focus:ring-2 focus:ring-gray-900/20 focus:border-gray-900 outline-none"
+                      disabled={isProcessing}
+                    >
+                      <option value="flat">Flat (₨)</option>
+                      <option value="percent">%</option>
+                    </select>
+                    <input
+                      type="number"
+                      min="0"
+                      max={discountType === "flat" ? totals.subtotal : 100}
+                      value={discount}
+                      onChange={(e) => setDiscount(Number(e.target.value))}
+                      placeholder="0"
+                      className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-right font-semibold focus:ring-2 focus:ring-gray-900/20 focus:border-gray-900 outline-none"
+                      disabled={isProcessing}
+                    />
+                  </div>
+                  {discount > 0 && totals.discountAmount < (discountType === "flat" ? discount : (discount * totals.subtotal / 100)) && (
+                    <p className="text-xs text-orange-600 mt-2">
+                      ⚠️ Discount adjusted to prevent negative profit
+                    </p>
+                  )}
+                </div>
+              )}
+
               {/* Cart Items */}
-              <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2 mb-4 scrollbar-thin">
+              <div className="space-y-3 max-h-[300px] overflow-y-auto pr-2 mb-4 scrollbar-thin">
                 {cart.length === 0 ? (
                   <div className="text-center py-12">
                     <div className="text-6xl mb-4">🛒</div>
@@ -733,20 +801,41 @@ export default function EmployeeDashboard() {
               {/* Total and Checkout */}
               {cart.length > 0 && (
                 <div className="border-t border-gray-200 pt-4">
+                  {/* Subtotal */}
+                  <div className="flex justify-between items-center mb-2 text-sm">
+                    <span className="text-gray-600">Subtotal:</span>
+                    <span className="font-semibold text-gray-900">
+                      ₨{formatCurrency(totals.subtotal)}
+                    </span>
+                  </div>
+                  
+                  {/* Discount */}
+                  {totals.discountAmount > 0 && (
+                    <div className="flex justify-between items-center mb-2 text-sm">
+                      <span className="text-gray-600">Discount:</span>
+                      <span className="font-semibold text-red-600">
+                        -₨{formatCurrency(totals.discountAmount)}
+                      </span>
+                    </div>
+                  )}
+                  
+                  {/* Total Amount */}
                   <div className="flex justify-between items-center mb-2">
-                    <span className="text-gray-600">Total Amount:</span>
+                    <span className="text-gray-600 font-semibold">Total Amount:</span>
                     <span className="text-2xl font-bold text-gray-900">
                       ₨{formatCurrency(totals.totalAmount)}
                     </span>
                   </div>
                   
+                  {/* Profit */}
                   <div className="flex justify-between items-center mb-4 text-sm">
                     <span className="text-gray-600">Est. Profit:</span>
-                    <span className="font-semibold text-green-600">
-                      ₨{formatCurrency(totals.totalProfit)}
+                    <span className={`font-semibold ${totals.finalProfit < 0 ? 'text-red-600' : 'text-green-600'}`}>
+                      ₨{formatCurrency(totals.finalProfit)}
                     </span>
                   </div>
 
+                  {/* Info Box */}
                   <div className="bg-blue-50 p-3 rounded-xl mb-4">
                     <p className="text-xs text-blue-800">
                       <span className="font-semibold">Employee:</span> {employeeName}<br />
@@ -755,20 +844,27 @@ export default function EmployeeDashboard() {
                     </p>
                   </div>
 
-                  <button
-                    onClick={completeSale}
-                    disabled={isProcessing}
-                    className="w-full bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white font-bold py-4 px-6 rounded-xl shadow-lg hover:shadow-xl transition-all duration-300 transform hover:scale-[1.02] active:scale-[0.98] text-lg disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 flex items-center justify-center gap-2"
-                  >
-                    {isProcessing ? (
-                      <>
-                        <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                        <span>Processing...</span>
-                      </>
-                    ) : (
-                      `Complete Sale for ${ownerName}`
-                    )}
-                  </button>
+                  {/* Complete Sale Button */}
+<button
+  onClick={completeSale}
+  disabled={isProcessing || totals.finalProfit < 0}
+  className={`w-full font-bold py-4 px-6 rounded-full shadow-lg hover:shadow-xl transition-all duration-300 transform hover:scale-[1.02] active:scale-[0.98] text-lg disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 flex items-center justify-center gap-2 ${
+    totals.finalProfit < 0
+      ? 'bg-gray-400 cursor-not-allowed'
+      : 'bg-black hover:bg-gray-800 text-white'
+  }`}
+>
+  {isProcessing ? (
+    <>
+      <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+      <span>Processing...</span>
+    </>
+  ) : totals.finalProfit < 0 ? (
+    'Cannot Complete (Negative Profit)'
+  ) : (
+    `Complete Sale for ${branchName}`
+  )}
+</button>
                 </div>
               )}
             </div>
