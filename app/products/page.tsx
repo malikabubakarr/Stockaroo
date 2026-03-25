@@ -27,8 +27,10 @@ interface Product {
   unit: string;
   qty: number;
   minStock: number;
-  purchaseRate: number;
-  saleRate: number;
+  purchaseRate: number;        // Current purchase rate
+  originalPurchaseRate: number; // Original purchase rate (when first added)
+  saleRate: number;            // Current sale rate
+  originalSaleRate: number;    // Original sale rate (when first added)
   profit: number;
   allowSale: boolean;
   branchId: string;
@@ -159,7 +161,9 @@ export default function Products() {
           qty: Number(row.qty) || 0,
           minStock: Number(row.minStock) || 0,
           purchaseRate,
+          originalPurchaseRate: purchaseRate, // Set original = current for new products
           saleRate,
+          originalSaleRate: saleRate, // Set original = current for new products
           profit: saleRate - purchaseRate,
           allowSale: true,
           branchId: activeBranch.id,
@@ -191,9 +195,25 @@ export default function Products() {
     );
 
     const unsub = onSnapshot(productsQuery, (snap) => {
-      const list: Product[] = snap.docs.map(
-        (d) => ({ id: d.id, ...d.data() } as Product)
-      );
+      const list: Product[] = snap.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          name: data.name,
+          category: data.category,
+          unit: data.unit,
+          qty: data.qty,
+          minStock: data.minStock,
+          purchaseRate: data.purchaseRate,
+          originalPurchaseRate: data.originalPurchaseRate || data.purchaseRate, // Fallback for existing products
+          saleRate: data.saleRate,
+          originalSaleRate: data.originalSaleRate || data.saleRate, // Fallback for existing products
+          profit: data.profit,
+          allowSale: data.allowSale,
+          branchId: data.branchId,
+          ownerId: data.ownerId,
+        } as Product;
+      });
 
       setProducts(list);
     });
@@ -240,6 +260,7 @@ export default function Products() {
     const profit = saleRate - purchaseRate;
 
     if (selectedProduct) {
+      // UPDATE EXISTING PRODUCT - Keep original prices unchanged
       await updateDoc(doc(db, "products", selectedProduct.id), {
         name,
         category,
@@ -251,10 +272,13 @@ export default function Products() {
         profit,
         allowSale,
         updatedAt: serverTimestamp(),
+        // IMPORTANT: DO NOT update originalPurchaseRate and originalSaleRate
+        // They remain as they were when product was first created
       });
 
       alert("Product Updated");
     } else {
+      // ADD NEW PRODUCT - Set original prices equal to current prices
       await addDoc(collection(db, "products"), {
         name,
         category,
@@ -262,7 +286,9 @@ export default function Products() {
         qty: Number(qty),
         minStock: Number(minStock),
         purchaseRate,
+        originalPurchaseRate: purchaseRate, // Store original price for historical reference
         saleRate,
+        originalSaleRate: saleRate, // Store original price for historical reference
         profit,
         allowSale,
         branchId: activeBranch.id,
@@ -469,6 +495,12 @@ export default function Products() {
                           <div className={`text-xs mt-1 ${selectedProduct?.id === p.id ? 'text-gray-300' : 'text-gray-500'}`}>
                             {p.category} • {p.unit}
                           </div>
+                          {/* Optional: Show original price in tooltip style */}
+                          {p.originalSaleRate !== p.saleRate && (
+                            <div className={`text-xs mt-1 ${selectedProduct?.id === p.id ? 'text-gray-400' : 'text-gray-400'}`}>
+                              Original: {currency.symbol}{formatCurrency(p.originalSaleRate)}
+                            </div>
+                          )}
                         </div>
                         <div className="text-right">
                           <div className="font-bold">{currency.symbol}{formatCurrency(p.saleRate)}</div>
@@ -568,18 +600,20 @@ export default function Products() {
                 <label className="block text-sm font-semibold text-gray-700 mb-1">
                   Unit
                 </label>
-                <select
-                  value={unit}
-                  onChange={(e) => setUnit(e.target.value)}
-                  className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 outline-none transition-all duration-300 text-gray-900"
-                >
-                  <option value="pcs">Pieces (pcs)</option>
-                  <option value="box">Box (box)</option>
-                  <option value="carton">Carton (ctn)</option>
-                  <option value="pack">Pack (pack)</option>
-                  <option value="kg">Kilogram (kg)</option>
-                  <option value="liter">Liter (L)</option>
-                </select>
+<select
+  value={unit}
+  onChange={(e) => setUnit(e.target.value)}
+  className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 outline-none transition-all duration-300 text-gray-900"
+>
+  <option value="pcs">Pieces (pcs)</option>
+  <option value="box">Box (box)</option>
+  <option value="carton">Carton (ctn)</option>
+  <option value="pack">Pack (pack)</option>
+  <option value="kg">Kilogram (kg)</option>
+  <option value="g">Gram (g)</option>
+  <option value="liter">Liter (L)</option>
+  <option value="ml">Milliliter (ml)</option>
+</select>
               </div>
 
               {/* Quantity and Min Stock */}
@@ -623,6 +657,11 @@ export default function Products() {
                     className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 outline-none transition-all duration-300 text-gray-900"
                     placeholder="0"
                   />
+                  {selectedProduct && selectedProduct.originalPurchaseRate !== Number(purchase) && (
+                    <p className="text-xs text-gray-500 mt-1">
+                      Original: {currency.symbol}{formatCurrency(selectedProduct.originalPurchaseRate)}
+                    </p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-sm font-semibold text-gray-700 mb-1">
@@ -635,6 +674,11 @@ export default function Products() {
                     className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 outline-none transition-all duration-300 text-gray-900"
                     placeholder="0"
                   />
+                  {selectedProduct && selectedProduct.originalSaleRate !== Number(sale) && (
+                    <p className="text-xs text-gray-500 mt-1">
+                      Original: {currency.symbol}{formatCurrency(selectedProduct.originalSaleRate)}
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -647,6 +691,14 @@ export default function Products() {
                       {currency.symbol}{formatCurrency(Number(sale) - Number(purchase))}
                     </span>
                   </div>
+                  {selectedProduct && selectedProduct.originalSaleRate && (
+                    <div className="flex justify-between items-center mt-1">
+                      <span className="text-xs text-gray-500">Original profit:</span>
+                      <span className="text-xs text-gray-600">
+                        {currency.symbol}{formatCurrency(selectedProduct.originalSaleRate - selectedProduct.originalPurchaseRate)}
+                      </span>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -663,6 +715,16 @@ export default function Products() {
                   Allow this product to be sold
                 </label>
               </div>
+
+              {/* Info Note about Price Changes */}
+              {selectedProduct && (
+                <div className="p-3 bg-blue-50 rounded-xl border border-blue-200">
+                  <p className="text-xs text-blue-700">
+                    💡 <strong>Note:</strong> Changing prices will only affect future sales. 
+                    Previous sales will keep their original prices for accurate records.
+                  </p>
+                </div>
+              )}
 
               {/* Action Buttons */}
               <div className="space-y-2 pt-4">

@@ -29,18 +29,25 @@ interface Product {
   name: string;
   qty: number;
   saleRate: number;
+  originalSaleRate?: number;  // Original price when product was first added
   profit: number;
+  originalProfit?: number;     // Original profit when product was first added
   allowSale: boolean;
   purchaseRate?: number;
+  originalPurchaseRate?: number; // Original purchase rate when product was first added
 }
 
 interface CartItem {
   id: string;
   name: string;
   qty: number;
-  price: number;
-  profit: number;
+  price: number;           // Original price before discount
+  profit: number;          // Original profit before discount
   purchaseRate?: number;
+  originalPrice?: number;  // Store original price for returns (same as price)
+  originalProfit?: number; // Store original profit for returns (same as profit)
+  effectivePrice?: number; // Price after discount (for accurate returns)
+  effectiveProfit?: number; // Profit after discount (for accurate returns)
 }
 
 interface Sale {
@@ -340,8 +347,11 @@ export default function Sales() {
         name: d.data().name,
         qty: d.data().qty,
         saleRate: d.data().saleRate,
+        originalSaleRate: d.data().originalSaleRate || d.data().saleRate,
         profit: d.data().profit,
+        originalProfit: d.data().originalProfit || d.data().profit,
         purchaseRate: d.data().purchaseRate,
+        originalPurchaseRate: d.data().originalPurchaseRate || d.data().purchaseRate,
         allowSale: d.data().allowSale,
       }));
       setProducts(list);
@@ -476,9 +486,13 @@ export default function Sales() {
         id: product.id, 
         name: product.name, 
         qty: quantity, 
-        price: product.saleRate, 
+        price: product.saleRate,
         profit: product.profit,
-        purchaseRate: product.purchaseRate 
+        purchaseRate: product.purchaseRate,
+        originalPrice: product.saleRate,           // Store original price for returns
+        originalProfit: product.profit,             // Store original profit for returns
+        effectivePrice: product.saleRate,          // Initially same as price (will be updated if discount applied)
+        effectiveProfit: product.profit,            // Initially same as profit (will be updated if discount applied)
       }];
     });
 
@@ -524,6 +538,28 @@ export default function Sales() {
     setConfirmSale(false);
 
     try {
+      // Calculate effective prices per item based on discount
+      const totalItemsPrice = cart.reduce((sum, c) => sum + c.price * c.qty, 0);
+      let discountPerItemRatio = 0;
+      
+      if (totals.discountAmount > 0 && totalItemsPrice > 0) {
+        discountPerItemRatio = totals.discountAmount / totalItemsPrice;
+      }
+      
+      // Update cart items with effective prices after discount
+      const updatedCartItems = cart.map(item => {
+        const itemTotalPrice = item.price * item.qty;
+        const itemDiscount = itemTotalPrice * discountPerItemRatio;
+        const effectivePrice = item.price - (itemDiscount / item.qty);
+        const effectiveProfit = item.profit - (itemDiscount / item.qty);
+        
+        return {
+          ...item,
+          effectivePrice: Math.max(0, effectivePrice),
+          effectiveProfit: Math.max(0, effectiveProfit),
+        };
+      });
+
       // If offline, save to localStorage
       if (isOffline) {
         const offlineSalesJson = localStorage.getItem("offlineSales");
@@ -534,7 +570,7 @@ export default function Sales() {
           branchId: activeBranch?.id,
           createdBy: currentUser?.name,
           role: currentUser?.role,
-          items: cart,
+          items: updatedCartItems,
           discount: totals.discountAmount,
           discountType,
           totalAmount: totals.finalPrice,
@@ -573,13 +609,13 @@ export default function Sales() {
 
       await Promise.all(updates);
 
-      // Create sale object with all necessary fields
+      // Create sale object with all necessary fields including effective prices
       const saleData: any = {
         ownerId,
         branchId: activeBranch?.id,
         createdBy: currentUser?.name,
         role: currentUser?.role,
-        items: cart,
+        items: updatedCartItems, // Use updated items with effective prices
         discount: totals.discountAmount,
         discountType,
         totalAmount: totals.finalPrice,
@@ -610,7 +646,7 @@ export default function Sales() {
     }
   }, [cart, totals, isOffline, ownerId, activeBranch?.id, currentUser, employeeId, currency, discountType]);
 
-  // Return Item - memoized
+  // Return Item - memoized (UPDATED to use effective prices)
   const returnItem = useCallback(async (sale: Sale, item: CartItem) => {
     if (DEBUG) console.log("=== RETURN ATTEMPT START ===");
     if (DEBUG) console.log("Sale from state:", sale);
@@ -654,17 +690,6 @@ export default function Sales() {
       return;
     }
     
-    const returnProfit = item.profit * qtyReturn;
-    
-    // Check if return would cause negative profit
-    const currentTotalProfit = sale.totalProfit || 0;
-    if ((currentTotalProfit - returnProfit) < 0) {
-      const confirmNegative = window.confirm(
-        `Warning: This return will result in negative profit for this sale (${currency.symbol}${formatCurrency(currentTotalProfit - returnProfit)}). Continue anyway?`
-      );
-      if (!confirmNegative) return;
-    }
-
     setIsReturnProcessing(true);
 
     try {
@@ -734,11 +759,21 @@ export default function Sales() {
         const originalItem = items[itemIndex];
         if (DEBUG) console.log("Original item:", originalItem);
         
-        // Calculate return amounts
-        const returnAmount = originalItem.price * qtyReturn;
-        const returnProfitAmount = originalItem.profit * qtyReturn;
+        // 🔥 CRITICAL CHANGE: Use effective price and profit for returns
+        // This ensures returns use the discounted prices, not original prices
+        const effectivePrice = originalItem.effectivePrice || originalItem.price;
+        const effectiveProfit = originalItem.effectiveProfit || originalItem.profit;
         
-        if (DEBUG) console.log("Return calculations:", { returnAmount, returnProfitAmount });
+        // Calculate return amounts using effective prices
+        const returnAmount = effectivePrice * qtyReturn;
+        const returnProfitAmount = effectiveProfit * qtyReturn;
+        
+        if (DEBUG) console.log("Return calculations (using effective prices):", { 
+          effectivePrice, 
+          effectiveProfit, 
+          returnAmount, 
+          returnProfitAmount 
+        });
         
         // Update quantity or remove item
         if (originalItem.qty === qtyReturn) {
@@ -752,7 +787,7 @@ export default function Sales() {
           };
         }
         
-        // Calculate new totals
+        // Calculate new totals using effective prices
         const newTotalAmount = (saleData.totalAmount || 0) - returnAmount;
         const newTotalProfit = (saleData.totalProfit || 0) - returnProfitAmount;
         
@@ -770,7 +805,7 @@ export default function Sales() {
           qty: increment(qtyReturn) 
         });
         
-        // Create return record
+        // Create return record with effective amounts
         const returnRecord = {
           itemId: item.id,
           itemName: item.name,
@@ -1235,7 +1270,7 @@ export default function Sales() {
                         s.items.map((item, index) => (
                           <div key={`${s.id}-${item.id}-${index}`} className="flex justify-between text-sm text-gray-700">
                             <span>{item.name} x {item.qty}</span>
-                            <span className="font-medium">{currency.symbol}{formatCurrency(item.price * item.qty)}</span>
+                            <span className="font-medium">{currency.symbol}{formatCurrency((item.effectivePrice || item.price) * item.qty)}</span>
                           </div>
                         ))
                       ) : (

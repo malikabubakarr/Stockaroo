@@ -3,8 +3,9 @@
 import { useBranch } from "@/context/BranchContext";
 import { useEffect, useState, useCallback, useMemo, memo } from "react";
 import { auth, db } from "@/lib/firebase";
-import { onAuthStateChanged } from "firebase/auth";
+import { onAuthStateChanged, signOut } from "firebase/auth";
 import { doc, getDoc, collection, onSnapshot, query, where, orderBy, writeBatch, limit } from "firebase/firestore";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
 
@@ -89,6 +90,7 @@ const StatsCard = memo(({
 StatsCard.displayName = 'StatsCard';
 
 export default function OwnerDashboard() {
+  const router = useRouter();
   const [ownerName, setOwnerName] = useState("");
   const [branches, setBranches] = useState<Branch[]>([]);
   const [currentUser, setCurrentUser] = useState<any>(null);
@@ -106,6 +108,7 @@ export default function OwnerDashboard() {
   });
   const [loadingStats, setLoadingStats] = useState(true);
   const [showCurrencyMenu, setShowCurrencyMenu] = useState(false);
+  const [showLogoutMenu, setShowLogoutMenu] = useState(false);
   const [currency, setCurrency] = useState<CurrencyOption>({
     symbol: "$",
     code: "USD",
@@ -127,6 +130,27 @@ export default function OwnerDashboard() {
     { symbol: "₪", code: "ILS", name: "Israeli Shekel", flag: "🇮🇱" },
     { symbol: "₫", code: "VND", name: "Vietnamese Dong", flag: "🇻🇳" },
   ];
+
+  /* ---------------- LOGOUT FUNCTION ---------------- */
+  const handleLogout = async () => {
+    try {
+      // Clear local storage
+      localStorage.removeItem("branches_cache");
+      localStorage.removeItem("activeBranch");
+      localStorage.removeItem("stats_cache");
+      localStorage.removeItem("lastLoggedIn");
+      localStorage.removeItem("userRole");
+      localStorage.removeItem("currency");
+      
+      // Sign out from Firebase
+      await signOut(auth);
+      
+      // Redirect to login page
+      router.push("/login");
+    } catch (error) {
+      console.error("Error logging out:", error);
+    }
+  };
 
   /* ---------------- ONLINE / OFFLINE DETECTION ---------------- */
   useEffect(() => {
@@ -181,6 +205,7 @@ export default function OwnerDashboard() {
     const unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
       if (!user) {
         setCurrentUser(null);
+        router.push("/login");
         return;
       }
 
@@ -576,19 +601,50 @@ export default function OwnerDashboard() {
             {/* Right Actions */}
             <div className="flex items-center gap-1.5 sm:gap-2 md:gap-3 w-full sm:w-auto justify-between sm:justify-end flex-wrap sm:flex-nowrap">
               
-              {/* Profile Avatar */}
-              <div className="flex-shrink-0 group">
-                {currentUser?.photoURL ? (
-                  <img
-                    src={currentUser.photoURL}
-                    alt="Profile"
-                    className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl border-2 border-white/30 shadow-xl ring-2 ring-white/20 hover:ring-white/50 transition-all duration-300 cursor-pointer group-hover:scale-105"
-                  />
-                ) : (
-                  <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-white/10 backdrop-blur-sm border-2 border-white/30 shadow-xl flex items-center justify-center font-bold text-xs sm:text-sm text-white ring-2 ring-white/20 group-hover:scale-105 transition-all duration-300 cursor-pointer">
-                    {getInitials(ownerName)}
-                  </div>
+              {/* Profile Avatar with Logout Dropdown */}
+              <div className="relative flex-shrink-0">
+                <button
+                  onClick={() => setShowLogoutMenu(!showLogoutMenu)}
+                  className="focus:outline-none"
+                >
+                  {currentUser?.photoURL ? (
+                    <img
+                      src={currentUser.photoURL}
+                      alt="Profile"
+                      className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl border-2 border-white/30 shadow-xl ring-2 ring-white/20 hover:ring-white/50 transition-all duration-300 cursor-pointer group-hover:scale-105"
+                    />
+                  ) : (
+                    <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-white/10 backdrop-blur-sm border-2 border-white/30 shadow-xl flex items-center justify-center font-bold text-xs sm:text-sm text-white ring-2 ring-white/20 group-hover:scale-105 transition-all duration-300 cursor-pointer">
+                      {getInitials(ownerName)}
+                    </div>
+                  )}
+                </button>
+                
+                {/* Logout Dropdown Menu */}
+                {showLogoutMenu && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setShowLogoutMenu(false)}></div>
+                    <div className="absolute right-0 mt-2 w-48 bg-white/95 backdrop-blur-2xl border border-gray-200/50 rounded-xl shadow-2xl z-50 overflow-hidden animate-in slide-in-from-top-2 duration-200">
+                      <div className="py-2">
+                        <div className="px-4 py-2 border-b border-gray-200/50">
+                          <p className="text-xs text-gray-500">Signed in as</p>
+                          <p className="text-sm font-semibold text-gray-900 truncate">{ownerName}</p>
+                          <p className="text-xs text-gray-500 truncate">{currentUser?.email}</p>
+                        </div>
+                        <button
+                          onClick={handleLogout}
+                          className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors flex items-center gap-2"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                          </svg>
+                          Sign Out
+                        </button>
+                      </div>
+                    </div>
+                  </>
                 )}
+                
                 <div className="hidden sm:block text-xs sm:text-sm font-semibold text-white/90 mt-0.5 truncate max-w-[100px] md:max-w-[150px]">
                   {ownerName || "Owner"}
                 </div>
