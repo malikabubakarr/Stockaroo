@@ -17,6 +17,7 @@ interface Product {
   saleRate: number;
   profit: number;
   allowSale: boolean;
+  barcode?: string | number; // Added barcode field
 }
 
 export default function InventoryPage() {
@@ -50,10 +51,22 @@ export default function InventoryPage() {
     );
 
     const unsub = onSnapshot(q, (snapshot) => {
-      const list: Product[] = snapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-      })) as Product[];
+      const list: Product[] = snapshot.docs.map((doc) => {
+        const data = doc.data();
+        return {
+          id: doc.id,
+          name: data.name,
+          category: data.category,
+          unit: data.unit,
+          qty: data.qty,
+          minStock: data.minStock,
+          purchaseRate: data.purchaseRate,
+          saleRate: data.saleRate,
+          profit: data.profit,
+          allowSale: data.allowSale,
+          barcode: data.barcode ? String(data.barcode) : "", // Convert to string
+        };
+      }) as Product[];
 
       setProducts(list);
     });
@@ -61,12 +74,21 @@ export default function InventoryPage() {
     return () => unsub();
   }, [activeBranch]);
 
-  // Search & sort
-  let filtered = products.filter(
-    (p) =>
-      p.name.toLowerCase().includes(search.toLowerCase()) ||
-      p.category?.toLowerCase().includes(search.toLowerCase())
-  );
+  // Search & sort - includes barcode search
+  let filtered = products.filter((p) => {
+    const searchLower = search.toLowerCase();
+    const nameMatch = p.name ? p.name.toLowerCase().includes(searchLower) : false;
+    const categoryMatch = p.category ? p.category.toLowerCase().includes(searchLower) : false;
+    
+    // Safe barcode check
+    let barcodeMatch = false;
+    if (p.barcode !== undefined && p.barcode !== null && p.barcode !== "") {
+      const barcodeStr = String(p.barcode);
+      barcodeMatch = barcodeStr.toLowerCase().includes(searchLower);
+    }
+    
+    return nameMatch || categoryMatch || barcodeMatch;
+  });
 
   filtered = filtered.sort((a, b) => {
     const aLow = a.qty <= a.minStock;
@@ -98,25 +120,26 @@ export default function InventoryPage() {
           </p>
         </div>
       )}
+      
       {/* Dashboard Button */}
-<div className="mb-4 text-right">
-<Link 
-href="/owner-dashboard" 
-className="inline-flex items-center px-4 py-2 bg-black/5 hover:bg-black/20 text-blackrounded-lg transition-all duration-300 border border-white/20 backdrop-blur-sm"
->
-<svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
-<path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1V4zM3 10a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1v-2zM3 16a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1v-2z" />
-</svg>
-Dashboard
-</Link>
-</div>
+      <div className="mb-4 text-right">
+        <Link 
+          href="/owner-dashboard" 
+          className="inline-flex items-center px-4 py-2 bg-black/5 hover:bg-black/20 text-black rounded-lg transition-all duration-300 border border-white/20 backdrop-blur-sm"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+            <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1V4zM3 10a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1v-2zM3 16a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1v-2z" />
+          </svg>
+          Dashboard
+        </Link>
+      </div>
 
       {/* SEARCH - Styled like your products page */}
       <div className="mb-8">
         <div className="relative group max-w-2xl">
           <input
             type="text"
-            placeholder="Search products by name or category..."
+            placeholder="Search products by name, category, or barcode..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="w-full pl-14 pr-6 py-4 text-lg bg-white/90 backdrop-blur-xl border border-gray-200/60 hover:border-gray-300 focus:ring-4 focus:ring-gray-200/50 focus:border-gray-400 rounded-2xl shadow-xl hover:shadow-2xl transition-all duration-300 outline-none placeholder-gray-500 font-medium"
@@ -133,7 +156,6 @@ Dashboard
             </button>
           )}
         </div>
-        
       </div>
 
       {/* TABLE with theme styling */}
@@ -142,6 +164,7 @@ Dashboard
           <table className="w-full">
             <thead className="bg-gradient-to-r from-gray-900 to-gray-800 text-white">
               <tr>
+                <th className="p-4 text-left font-semibold">Barcode</th>
                 <th className="p-4 text-left font-semibold">Name</th>
                 <th className="p-4 text-left font-semibold">Category</th>
                 <th className="p-4 text-center font-semibold">Unit</th>
@@ -165,6 +188,16 @@ Dashboard
                       isCritical ? 'bg-red-50/50' : isLow ? 'bg-orange-50/30' : ''
                     }`}
                   >
+                    <td className="p-4">
+                      {p.barcode ? (
+                        <span className="font-mono text-sm text-gray-600 flex items-center gap-1">
+                          <span className="text-blue-500">📷</span>
+                          {p.barcode}
+                        </span>
+                      ) : (
+                        <span className="text-gray-400 text-sm">—</span>
+                      )}
+                    </td>
                     <td className="p-4 font-medium text-gray-900">{p.name}</td>
                     <td className="p-4 text-gray-700">{p.category || "—"}</td>
                     <td className="p-4 text-center text-gray-700">{p.unit}</td>
@@ -204,7 +237,7 @@ Dashboard
 
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={9} className="text-center p-12">
+                  <td colSpan={10} className="text-center p-12">
                     <div className="text-4xl mb-3">📦</div>
                     <p className="text-lg text-gray-500 font-medium">No products found</p>
                     <p className="text-sm text-gray-400 mt-2">

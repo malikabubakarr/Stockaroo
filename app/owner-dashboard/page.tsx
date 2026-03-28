@@ -39,7 +39,7 @@ interface CurrencyOption {
   flag: string;
 }
 
-// Memoized StatsCard to prevent re-renders
+// Memoized StatsCard - Fully Responsive
 const StatsCard = memo(({ 
   title, 
   sales, 
@@ -64,24 +64,24 @@ const StatsCard = memo(({
   };
 
   return (
-    <div className="group relative bg-gradient-to-b from-gray-900/95 to-gray-800/90 backdrop-blur-xl p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-white/10 shadow-2xl hover:shadow-3xl hover:-translate-y-0.5 sm:hover:-translate-y-1 transition-all duration-300 overflow-hidden h-full flex flex-col justify-between">
-      {/* Subtle shine effect */}
+    <div className="group relative bg-gradient-to-b from-gray-900/95 to-gray-800/90 backdrop-blur-xl p-2 xs:p-3 sm:p-4 rounded-xl border border-white/10 shadow-2xl hover:shadow-3xl hover:-translate-y-0.5 transition-all duration-300 overflow-hidden h-full flex flex-col justify-between min-h-[80px] xs:min-h-[90px] sm:min-h-[100px]">
+      {/* Shine effect - Responsive */}
       <div className="absolute inset-0 bg-gradient-to-r from-white/10 via-transparent to-white/5 opacity-0 group-hover:opacity-100 transition-opacity duration-500 -skew-x-12 -translate-x-32 group-hover:translate-x-32 pointer-events-none"></div>
       
-      <div className="relative z-10 flex items-center justify-between mb-1.5 sm:mb-2 md:mb-3">
-        <div className="text-gray-300 text-[10px] sm:text-xs font-medium uppercase tracking-wider">{title}</div>
-        <div className="text-gray-400 text-sm sm:text-base md:text-lg opacity-90">{icon}</div>
+      <div className="relative z-10 flex items-center justify-between mb-1 xs:mb-1.5 sm:mb-2">
+        <div className="text-gray-300 text-[9px] xs:text-[10px] sm:text-xs font-medium uppercase tracking-wider line-clamp-1 max-w-[60%]">{title}</div>
+        <div className="text-gray-400 text-[12px] xs:text-sm sm:text-base opacity-90">{icon}</div>
       </div>
       
-      <div className="space-y-1 sm:space-y-2 flex-1 flex flex-col justify-end">
-        <div className="text-lg sm:text-xl md:text-2xl font-bold bg-gradient-to-r from-white to-gray-200 bg-clip-text text-transparent drop-shadow-sm truncate">
+      <div className="space-y-0.5 xs:space-y-1 sm:space-y-1.5 flex-1 flex flex-col justify-end">
+        <div className="text-[13px] xs:text-sm sm:text-lg md:text-xl font-bold bg-gradient-to-r from-white to-gray-200 bg-clip-text text-transparent drop-shadow-sm line-clamp-1">
           {currencySymbol}{isLoading ? '...' : formatCurrency(sales)}
         </div>
-        <div className="text-xs sm:text-sm font-semibold text-white/90 flex items-center gap-0.5 sm:gap-1 flex-wrap">
-          <span className="truncate">{currencySymbol}{isLoading ? '...' : formatCurrency(profit)}</span> 
-          <span className="text-[10px] sm:text-xs text-gray-300">Profit</span>
+        <div className="text-[9px] xs:text-xs sm:text-sm font-semibold text-white/90 flex items-center gap-0.5 flex-wrap">
+          <span className="truncate min-w-0">{currencySymbol}{isLoading ? '...' : formatCurrency(profit)}</span> 
+          <span className="text-[8px] xs:text-[10px] sm:text-xs text-gray-300">Profit</span>
         </div>
-        <div className="text-[10px] sm:text-xs text-gray-400 font-medium">{period}</div>
+        <div className="text-[8px] xs:text-[10px] sm:text-xs text-gray-400 font-medium line-clamp-1">{period}</div>
       </div>
     </div>
   );
@@ -134,7 +134,6 @@ export default function OwnerDashboard() {
   /* ---------------- LOGOUT FUNCTION ---------------- */
   const handleLogout = async () => {
     try {
-      // Clear local storage
       localStorage.removeItem("branches_cache");
       localStorage.removeItem("activeBranch");
       localStorage.removeItem("stats_cache");
@@ -142,10 +141,7 @@ export default function OwnerDashboard() {
       localStorage.removeItem("userRole");
       localStorage.removeItem("currency");
       
-      // Sign out from Firebase
       await signOut(auth);
-      
-      // Redirect to login page
       router.push("/login");
     } catch (error) {
       console.error("Error logging out:", error);
@@ -170,14 +166,12 @@ export default function OwnerDashboard() {
 
   /* ---------------- AUTH + DATA LOAD WITH CACHE ---------------- */
   useEffect(() => {
-    // Load branches from cache instantly
     const cachedBranches = localStorage.getItem("branches_cache");
     if (cachedBranches) {
       try {
         const parsed = JSON.parse(cachedBranches);
         setBranches(parsed);
         
-        // Also try to load active branch from cache
         const storedBranch = localStorage.getItem("activeBranch");
         if (storedBranch) {
           const parsedBranch = JSON.parse(storedBranch);
@@ -191,7 +185,6 @@ export default function OwnerDashboard() {
       }
     }
 
-    // Load stats from cache
     const cachedStats = localStorage.getItem("stats_cache");
     if (cachedStats) {
       try {
@@ -220,7 +213,6 @@ export default function OwnerDashboard() {
           const userData = userSnap.data();
           setOwnerName(userData.name || "Owner");
           
-          // Load user's saved currency preference
           if (userData.currency) {
             const savedCurrency = currencies.find(c => c.code === userData.currency);
             if (savedCurrency) {
@@ -248,8 +240,6 @@ export default function OwnerDashboard() {
           });
         
           setBranches(branchList);
-          
-          // Save to cache
           localStorage.setItem("branches_cache", JSON.stringify(branchList));
         
           const storedBranch = localStorage.getItem("activeBranch");
@@ -276,27 +266,23 @@ export default function OwnerDashboard() {
     });
 
     return () => unsubscribeAuth();
-  }, []);
+  }, [router, currency.code, currency.symbol]);
 
-  /* ---------------- UPDATE USER CURRENCY PREFERENCE WITH BATCH ---------------- */
+  /* ---------------- UPDATE USER CURRENCY PREFERENCE ---------------- */
   const updateUserCurrency = useCallback(async (selectedCurrency: CurrencyOption) => {
     if (!currentUser?.uid) return;
     
     setUpdatingCurrency(true);
     try {
       const userDocRef = doc(db, "users", currentUser.uid);
-      
-      // Use batch write for all updates
       const batch = writeBatch(db);
       
-      // Update user preference
       batch.update(userDocRef, {
         currency: selectedCurrency.code,
         currencySymbol: selectedCurrency.symbol,
         updatedAt: new Date()
       });
       
-      // Update all branches at once with batch
       branches.forEach((branch) => {
         const branchRef = doc(db, "branches", branch.id);
         batch.update(branchRef, {
@@ -305,10 +291,7 @@ export default function OwnerDashboard() {
         });
       });
       
-      // Commit all updates at once
       await batch.commit();
-      
-      // Update local state
       setCurrency(selectedCurrency);
       
       if (DEBUG) console.log("Currency updated successfully for all branches");
@@ -321,7 +304,7 @@ export default function OwnerDashboard() {
     }
   }, [currentUser?.uid, branches]);
 
-  /* ---------------- STATS LOAD WITH LIMIT AND CACHE ---------------- */
+  /* ---------------- STATS LOAD ---------------- */
   useEffect(() => {
     if (!activeBranch?.id || !currentUser?.uid) {
       setLoadingStats(false);
@@ -331,13 +314,12 @@ export default function OwnerDashboard() {
     const ownerId = currentUser.uid;
     const branchId = activeBranch.id;
 
-    // 🔥 CRITICAL FIX: Add limit to sales query
     const salesQuery = query(
       collection(db, "sales"),
       where("ownerId", "==", ownerId),
       where("branchId", "==", branchId),
       orderBy("date", "desc"),
-      limit(200) // Only load recent 200 sales for performance
+      limit(200)
     );
 
     const unsubscribe = onSnapshot(salesQuery, (snap) => {
@@ -384,36 +366,30 @@ export default function OwnerDashboard() {
       };
 
       setStats(statsData);
-      
-      // ✅ Save stats to cache for offline/instant load
       localStorage.setItem("stats_cache", JSON.stringify(statsData));
-      
       setLoadingStats(false);
     });
 
     return () => unsubscribe();
   }, [activeBranch?.id, currentUser?.uid]);
 
-  /* ---------------- SAVE ACTIVE BRANCH TO LOCAL STORAGE ---------------- */
+  /* ---------------- SAVE ACTIVE BRANCH ---------------- */
   useEffect(() => {
     if (activeBranch) {
       localStorage.setItem("activeBranch", JSON.stringify(activeBranch));
     }
   }, [activeBranch]);
 
-  /* ---------------- LOAD SAVED CURRENCY FROM LOCAL STORAGE (FALLBACK) ---------------- */
+  /* ---------------- CURRENCY LOCAL STORAGE ---------------- */
   useEffect(() => {
     const savedCurrency = localStorage.getItem("currency");
     if (savedCurrency && !currentUser) {
       try {
         setCurrency(JSON.parse(savedCurrency));
-      } catch (e) {
-        // ignore
-      }
+      } catch (e) {}
     }
   }, [currentUser]);
 
-  /* ---------------- SAVE CURRENCY TO LOCAL STORAGE (FALLBACK) ---------------- */
   useEffect(() => {
     localStorage.setItem("currency", JSON.stringify(currency));
   }, [currency]);
@@ -427,7 +403,7 @@ export default function OwnerDashboard() {
       .toUpperCase()
       .slice(0, 2), []);
 
-  // Memoized branch list to prevent unnecessary re-renders
+  // Memoized branch list - PERFECT RESPONSIVE
   const branchElements = useMemo(() => {
     return branches.map((branch) => {
       const branchWithCurrency = {
@@ -443,35 +419,34 @@ export default function OwnerDashboard() {
             setActiveBranch(branchWithCurrency);
             localStorage.setItem("activeBranch", JSON.stringify(branchWithCurrency));
           }}
-          className={`group relative px-3 sm:px-4 md:px-5 py-2 sm:py-2.5 md:py-3.5 rounded-lg sm:rounded-xl text-xs sm:text-sm font-bold border-2 shadow-xl transition-all duration-400 flex items-center gap-1 sm:gap-2 backdrop-blur-xl flex-shrink-0 whitespace-nowrap hover:scale-[1.02] active:scale-[0.98] h-10 sm:h-12 md:h-14 min-w-[120px] sm:min-w-[140px] md:min-w-[160px] max-w-[180px] sm:max-w-[200px] md:max-w-[220px] ${
+          className={`group relative px-2 xs:px-3 sm:px-4 py-1.5 xs:py-2 sm:py-2.5 rounded-lg text-[10px] xs:text-xs sm:text-sm font-bold border-2 shadow-xl transition-all duration-400 flex items-center gap-1 xs:gap-1.5 sm:gap-2 backdrop-blur-xl flex-shrink-0 whitespace-nowrap hover:scale-[1.02] active:scale-[0.98] h-9 xs:h-10 sm:h-11 min-w-[100px] xs:min-w-[110px] sm:min-w-[130px] max-w-[140px] xs:max-w-[160px] sm:max-w-[180px] ${
             activeBranch?.id === branch.id
               ? "bg-gradient-to-r from-white/20 to-white/10 text-white border-white/40 shadow-white/20 shadow-2xl ring-2 sm:ring-4 ring-white/30 backdrop-blur-2xl"
               : "bg-white/10 hover:bg-white/20 text-white/95 border-white/30 hover:border-white/50 hover:shadow-2xl hover:shadow-white/20 backdrop-blur-xl"
           }`}
         >
-          <span className="truncate block font-semibold text-xs sm:text-sm">
-            {branch.shopName.length > 12 ? `${branch.shopName.slice(0, 12)}...` : branch.shopName}
+          <span className="truncate block font-semibold text-[9px] xs:text-xs sm:text-sm max-w-[70%]">
+            {branch.shopName.length > 10 ? `${branch.shopName.slice(0, 10)}...` : branch.shopName}
           </span>
           {branch.isMain && (
-            <span className="text-[10px] sm:text-xs bg-white/20 backdrop-blur-sm text-white px-1.5 sm:px-2 py-0.5 rounded-full font-bold shadow-md ml-auto flex-shrink-0">
+            <span className="text-[8px] xs:text-[10px] sm:text-xs bg-white/20 backdrop-blur-sm text-white px-1 xs:px-1.5 py-0.5 rounded-full font-bold shadow-md ml-auto flex-shrink-0">
               ⭐
             </span>
           )}
           {branch.currency && branch.currency !== currency.code && (
-            <span className="text-[10px] sm:text-xs bg-white/10 backdrop-blur-sm text-white/80 px-1 py-0.5 rounded-full ml-0.5 sm:ml-1 flex-shrink-0">
+            <span className="text-[8px] xs:text-[10px] sm:text-xs bg-white/10 backdrop-blur-sm text-white/80 px-0.5 xs:px-1 py-0.5 rounded-full ml-0.5 flex-shrink-0">
               {branch.currencySymbol || branch.currency}
             </span>
           )}
         </button>
       );
     });
-  }, [branches, activeBranch?.id, currency.code, currency.symbol, setActiveBranch]);
-
-  // Memoized stats cards
+  }, [branches, activeBranch?.id, currency.code, currency.symbol, setActiveBranch]);  
+// Memoized stats cards - PERFECT RESPONSIVE
   const statsCards = useMemo(() => {
     if (activeBranch && !loadingStats) {
       return (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3 md:gap-4 lg:gap-5 w-full">
+        <div className="grid grid-cols-2 xs:grid-cols-3 sm:grid-cols-4 gap-1.5 xs:gap-2 sm:gap-3 w-full">
           <StatsCard
             title="Today"
             sales={stats.todaySales}
@@ -513,17 +488,17 @@ export default function OwnerDashboard() {
     }
     
     return (
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3 md:gap-4 lg:gap-5 w-full">
+      <div className="grid grid-cols-2 xs:grid-cols-3 sm:grid-cols-4 gap-1.5 xs:gap-2 sm:gap-3 w-full">
         {Array(4).fill(0).map((_, i) => (
-          <div key={i} className="group relative bg-gradient-to-b from-gray-900/80 to-gray-800/70 backdrop-blur-xl p-3 sm:p-4 rounded-xl border border-white/10 shadow-2xl animate-pulse h-full flex flex-col justify-between">
-            <div className="flex items-center justify-between mb-2 sm:mb-3 md:mb-4">
-              <div className="h-2 sm:h-2.5 md:h-3 bg-white/30 rounded-full w-8 sm:w-10 md:w-14"></div>
-              <div className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6 bg-white/20 rounded-lg sm:rounded-xl"></div>
+          <div key={i} className="group relative bg-gradient-to-b from-gray-900/80 to-gray-800/70 backdrop-blur-xl p-2 xs:p-3 sm:p-4 rounded-xl border border-white/10 shadow-2xl animate-pulse h-full flex flex-col justify-between min-h-[80px] xs:min-h-[90px] sm:min-h-[100px]">
+            <div className="flex items-center justify-between mb-1 xs:mb-1.5 sm:mb-2">
+              <div className="h-2 xs:h-2.5 sm:h-3 bg-white/30 rounded-full w-8 xs:w-10 sm:w-14"></div>
+              <div className="w-4 h-4 xs:w-5 xs:h-5 sm:w-6 sm:h-6 bg-white/20 rounded-lg xs:rounded-xl"></div>
             </div>
-            <div className="space-y-1 sm:space-y-2 md:space-y-3">
-              <div className="h-4 sm:h-5 md:h-7 bg-white/20 rounded-lg sm:rounded-xl w-16 sm:w-20 md:w-24"></div>
-              <div className="h-2 sm:h-3 md:h-4 bg-white/20 rounded-full w-12 sm:w-16 md:w-20"></div>
-              <div className="h-1.5 sm:h-2 md:h-3 bg-white/15 rounded w-10 sm:w-12 md:w-16"></div>
+            <div className="space-y-0.5 xs:space-y-1 sm:space-y-1.5">
+              <div className="h-4 xs:h-5 sm:h-7 bg-white/20 rounded-lg xs:rounded-xl w-16 xs:w-20 sm:w-24"></div>
+              <div className="h-2 xs:h-3 sm:h-4 bg-white/20 rounded-full w-12 xs:w-16 sm:w-20"></div>
+              <div className="h-1.5 xs:h-2 sm:h-3 bg-white/15 rounded w-10 xs:w-12 sm:w-16"></div>
             </div>
           </div>
         ))}
@@ -531,7 +506,7 @@ export default function OwnerDashboard() {
     );
   }, [activeBranch, loadingStats, stats, currency.symbol]);
 
-  // Memoized menu cards
+  // Memoized menu cards - PERFECT RESPONSIVE
   const menuCards = useMemo(() => {
     const cards = [
       { href: "/products", icon: "📦", title: "Products", subtitle: "Manage inventory" },
@@ -546,20 +521,19 @@ export default function OwnerDashboard() {
       <Link 
         key={href} 
         href={href}
-        className="group relative bg-white/90 hover:bg-white backdrop-blur-xl p-4 sm:p-5 md:p-6 rounded-xl sm:rounded-2xl border border-gray-200/60 hover:border-gray-300 shadow-lg hover:shadow-2xl hover:shadow-gray-200/50 hover:-translate-y-1 sm:hover:-translate-y-2 active:translate-y-0 transition-all duration-400 overflow-hidden text-center h-full min-h-[100px] sm:min-h-[110px] md:min-h-[130px] flex flex-col justify-center items-stretch"
+        className="group relative bg-white/90 hover:bg-white backdrop-blur-xl p-2.5 xs:p-3 sm:p-4 md:p-5 rounded-xl border border-gray-200/60 hover:border-gray-300 shadow-lg hover:shadow-2xl hover:shadow-gray-200/50 hover:-translate-y-1 transition-all duration-400 overflow-hidden text-center h-full min-h-[80px] xs:min-h-[90px] sm:min-h-[100px] md:min-h-[110px] flex flex-col justify-center items-stretch"
       >
-        {/* Shine effect */}
         <div className="absolute inset-0 bg-gradient-to-r from-white/20 via-transparent to-white/10 opacity-0 group-hover:opacity-100 transition-all duration-700 -skew-x-12 -translate-x-full group-hover:translate-x-full pointer-events-none"></div>
         
-        <div className="relative z-10 flex flex-col items-center gap-2 sm:gap-2.5 md:gap-3 h-full justify-center pb-1 sm:pb-2">
-          <div className="w-12 h-12 sm:w-14 sm:h-14 md:w-16 md:h-16 bg-gradient-to-br from-gray-900 to-gray-800 rounded-xl sm:rounded-2xl flex items-center justify-center shadow-2xl group-hover:scale-110 transition-all duration-400 backdrop-blur-sm border border-white/20 hover:border-white/40">
-            <span className="text-2xl sm:text-3xl md:text-4xl">{icon}</span>
+        <div className="relative z-10 flex flex-col items-center gap-1.5 xs:gap-2 sm:gap-2.5 h-full justify-center pb-1 xs:pb-1.5 sm:pb-2">
+          <div className="w-10 h-10 xs:w-11 xs:h-11 sm:w-12 sm:h-12 md:w-14 md:h-14 bg-gradient-to-br from-gray-900 to-gray-800 rounded-xl sm:rounded-2xl flex items-center justify-center shadow-2xl group-hover:scale-110 transition-all duration-400 backdrop-blur-sm border border-white/20 hover:border-white/40">
+            <span className="text-xl xs:text-2xl sm:text-3xl">{icon}</span>
           </div>
-          <div className="space-y-0.5 sm:space-y-1 px-1 sm:px-2">
-            <p className="font-bold text-sm sm:text-base md:text-lg text-gray-900 leading-tight line-clamp-2 group-hover:text-gray-950">
+          <div className="space-y-0.5 px-1 xs:px-1.5 sm:px-2 w-full">
+            <p className="font-bold text-[11px] xs:text-xs sm:text-sm md:text-base text-gray-900 leading-tight line-clamp-2 group-hover:text-gray-950">
               {title}
             </p>
-            <p className="text-xs sm:text-sm text-gray-600 font-semibold tracking-wide line-clamp-2">
+            <p className="text-[9px] xs:text-[10px] sm:text-xs text-gray-600 font-semibold tracking-wide line-clamp-2">
               {subtitle}
             </p>
           </div>
@@ -569,244 +543,211 @@ export default function OwnerDashboard() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 text-gray-900">
-      
-      {/* HEADER - Stylish Black */}
-      <header className="bg-gradient-to-b from-gray-900 via-gray-900/95 to-gray-900/90 text-white shadow-2xl backdrop-blur-2xl border-b border-white/10 z-50">
-        <div className="w-full px-3 sm:px-4 md:px-6 lg:px-8 max-w-7xl mx-auto">
-          
-          {/* Top Bar */}
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between py-3 sm:py-4 gap-3 min-h-[60px] sm:min-h-[72px]">
-            
-            {/* Logo & Owner Name */}
-            <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0 w-full sm:w-auto">
-              <div className="relative group flex-shrink-0">
-                <Image
-                  src="/stockaro-logo.png"
-                  alt="Stockaroo"
-                  width={40}
-                  height={40}
-                  className="w-8 h-8 sm:w-10 sm:h-10 object-contain rounded-xl shadow-lg group-hover:scale-110 transition-all duration-300"
-                  priority
-                />
-                <div className="absolute inset-0 bg-gradient-to-r from-white/20 to-transparent rounded-xl blur opacity-0 group-hover:opacity-100 transition-all duration-300"></div>
-              </div>
-              <div className="min-w-0 flex-1 sm:flex-none">
-                <h1 className="text-base sm:text-xl md:text-2xl font-bold tracking-tight bg-gradient-to-r from-white via-gray-100 to-gray-200 bg-clip-text text-transparent truncate">
-                  Stockaroo
-                </h1>
-              </div>
-            </div>
+<div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 text-gray-900">
+  
+ <header className="bg-gradient-to-b from-gray-900 via-gray-900/95 to-gray-900/90 text-white shadow-2xl border-b border-white/10">
+  <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
 
-            {/* Right Actions */}
-            <div className="flex items-center gap-1.5 sm:gap-2 md:gap-3 w-full sm:w-auto justify-between sm:justify-end flex-wrap sm:flex-nowrap">
-              
-              {/* Profile Avatar with Logout Dropdown */}
-              <div className="relative flex-shrink-0">
-                <button
-                  onClick={() => setShowLogoutMenu(!showLogoutMenu)}
-                  className="focus:outline-none"
-                >
-                  {currentUser?.photoURL ? (
-                    <img
-                      src={currentUser.photoURL}
-                      alt="Profile"
-                      className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl border-2 border-white/30 shadow-xl ring-2 ring-white/20 hover:ring-white/50 transition-all duration-300 cursor-pointer group-hover:scale-105"
-                    />
-                  ) : (
-                    <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-white/10 backdrop-blur-sm border-2 border-white/30 shadow-xl flex items-center justify-center font-bold text-xs sm:text-sm text-white ring-2 ring-white/20 group-hover:scale-105 transition-all duration-300 cursor-pointer">
-                      {getInitials(ownerName)}
-                    </div>
-                  )}
-                </button>
-                
-                {/* Logout Dropdown Menu */}
-                {showLogoutMenu && (
-                  <>
-                    <div className="fixed inset-0 z-40" onClick={() => setShowLogoutMenu(false)}></div>
-                    <div className="absolute right-0 mt-2 w-48 bg-white/95 backdrop-blur-2xl border border-gray-200/50 rounded-xl shadow-2xl z-50 overflow-hidden animate-in slide-in-from-top-2 duration-200">
-                      <div className="py-2">
-                        <div className="px-4 py-2 border-b border-gray-200/50">
-                          <p className="text-xs text-gray-500">Signed in as</p>
-                          <p className="text-sm font-semibold text-gray-900 truncate">{ownerName}</p>
-                          <p className="text-xs text-gray-500 truncate">{currentUser?.email}</p>
-                        </div>
-                        <button
-                          onClick={handleLogout}
-                          className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors flex items-center gap-2"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-                          </svg>
-                          Sign Out
-                        </button>
-                      </div>
-                    </div>
-                  </>
-                )}
-                
-                <div className="hidden sm:block text-xs sm:text-sm font-semibold text-white/90 mt-0.5 truncate max-w-[100px] md:max-w-[150px]">
-                  {ownerName || "Owner"}
+    {/* TOP BAR */}
+    <div className="flex items-center justify-between py-4">
+
+      {/* LEFT: LOGO */}
+      <div className="flex items-center gap-3">
+        <Image
+          src="/stockaro-logo.png"
+          alt="Stockaroo"
+          width={40}
+          height={40}
+          className="rounded-xl shadow-lg"
+        />
+        <h1 className="text-lg sm:text-2xl font-bold">Stockaroo</h1>
+      </div>
+
+      {/* RIGHT ACTIONS */}
+      <div className="flex items-center gap-3">
+
+        {/* PROFILE */}
+        <div>
+          <button onClick={() => setShowLogoutMenu(!showLogoutMenu)}>
+            <div className="w-9 h-9 rounded-xl bg-white/10 flex items-center justify-center font-bold">
+              {getInitials(ownerName)}
+            </div>
+          </button>
+        </div>
+
+        {/* CURRENCY */}
+        <div>
+          <button
+            onClick={() => setShowCurrencyMenu(!showCurrencyMenu)}
+            className="flex items-center gap-2 bg-white/10 px-3 py-2 rounded-xl"
+          >
+            <span>{currency.flag}</span>
+            <span>{currency.symbol}</span>
+          </button>
+        </div>
+
+      </div>
+    </div>
+
+    {/* BRANCH SCROLL (FIXED) */}
+    {branches.length > 0 && (
+      <div className="pb-4 overflow-x-auto">
+        <div className="flex gap-3 py-2 min-w-max">
+          {branchElements}
+        </div>
+      </div>
+    )}
+
+    {/* STATS */}
+    <div className="pb-6">
+      {statsCards}
+    </div>
+
+  </div>
+
+  {/* ================= DROPDOWNS (OUTSIDE HEADER FLOW) ================= */}
+
+  {/* LOGOUT DROPDOWN */}
+  {showLogoutMenu && (
+    <>
+      <div
+        className="fixed inset-0 z-[9998] bg-black/20"
+        onClick={() => setShowLogoutMenu(false)}
+      />
+      <div className="fixed top-16 right-4 sm:right-6 z-[9999] w-[90vw] max-w-xs bg-white text-black rounded-2xl shadow-2xl border overflow-hidden">
+        <div className="p-4 border-b">
+          <p className="text-xs text-gray-500">Signed in as</p>
+          <p className="font-semibold truncate">{ownerName}</p>
+          <p className="text-xs text-gray-500 truncate">{currentUser?.email}</p>
+        </div>
+
+        <button
+          onClick={handleLogout}
+          className="w-full text-left px-4 py-3 text-red-600 hover:bg-red-50"
+        >
+          Sign Out
+        </button>
+      </div>
+    </>
+  )}
+
+  {/* CURRENCY DROPDOWN */}
+  {showCurrencyMenu && (
+    <>
+      <div
+        className="fixed inset-0 z-[9998] bg-black/20"
+        onClick={() => setShowCurrencyMenu(false)}
+      />
+      <div className="fixed top-16 right-4 sm:right-6 z-[9999] w-[90vw] max-w-sm bg-white text-black rounded-2xl shadow-2xl border">
+        <div className="p-4 max-h-[70vh] overflow-y-auto">
+          <h3 className="text-sm font-bold mb-3 text-center">
+            🌍 Select Currency
+          </h3>
+
+          <div className="space-y-2">
+            {currencies.map((cur) => (
+              <button
+                key={cur.code}
+                onClick={() => updateUserCurrency(cur)}
+                className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-gray-100"
+              >
+                <span>{cur.flag}</span>
+                <div className="flex-1 text-left">
+                  <div className="font-semibold">{cur.name}</div>
+                  <div className="text-xs text-gray-500">{cur.code}</div>
                 </div>
-              </div>
-              
-              {/* Currency Selector */}
-              <div className="relative flex-shrink-0 z-50">
-                <button
-                  onClick={() => setShowCurrencyMenu(!showCurrencyMenu)}
-                  disabled={updatingCurrency}
-                  className="group flex items-center gap-1 sm:gap-2 bg-white/10 hover:bg-white/20 backdrop-blur-xl px-2 sm:px-3 md:px-4 py-1.5 sm:py-2 rounded-xl border border-white/30 hover:border-white/50 text-white font-semibold text-xs sm:text-sm shadow-xl hover:shadow-2xl transition-all duration-300 hover:scale-[1.02] active:scale-[0.98] h-8 sm:h-10 md:h-12 flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <span className="text-base sm:text-lg">{currency.flag}</span>
-                  <span className="font-bold text-sm sm:text-base">{currency.symbol}</span>
-                  <svg className={`w-3 h-3 sm:w-4 sm:h-4 transition-transform duration-300 ${showCurrencyMenu ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19 9l-7 7-7-7" />
-                  </svg>
-                </button>
-                
-                {/* Currency Dropdown - Responsive */}
-                {showCurrencyMenu && (
-                  <div className="absolute top-full right-0 mt-1 sm:mt-2 w-64 sm:w-72 md:w-80 max-w-[calc(100vw-2rem)] bg-white/95 backdrop-blur-2xl border border-gray-200/50 rounded-xl sm:rounded-2xl shadow-2xl z-50 animate-in slide-in-from-top-2 duration-300 max-h-[50vh] sm:max-h-[60vh] overflow-y-auto">
-                    <div className="py-2 sm:py-3">
-                      <div className="px-3 sm:px-4 md:px-5 py-2 sm:py-3 md:py-4 border-b border-gray-200/50 bg-white/80 backdrop-blur-sm">
-                        <h3 className="text-xs sm:text-sm md:text-base font-bold text-gray-900 uppercase tracking-wider flex items-center gap-1 sm:gap-2">
-                          <span className="text-sm sm:text-base">🌍</span> 
-                          <span className="truncate">Select Currency</span>
-                        </h3>
-                      </div>
-                      <div className="max-h-[40vh] sm:max-h-[45vh] md:max-h-[50vh] overflow-y-auto">
-                        {currencies.map((cur) => (
-                          <button
-                            key={cur.code}
-                            onClick={() => updateUserCurrency(cur)}
-                            disabled={updatingCurrency}
-                            className="w-full flex items-center gap-2 sm:gap-3 px-3 sm:px-4 md:px-5 py-2 sm:py-3 md:py-4 hover:bg-gray-50/80 transition-all duration-300 text-left text-xs sm:text-sm font-semibold border-b border-gray-100/50 last:border-b-0 hover:border-gray-200 hover:shadow-sm focus:outline-none focus:ring-2 focus:ring-gray-400/50 disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            <span className="text-lg sm:text-xl md:text-2xl flex-shrink-0">{cur.flag}</span>
-                            <div className="flex-1 min-w-0">
-                              <div className="font-bold text-gray-900 truncate text-xs sm:text-sm md:text-base">{cur.name}</div>
-                              <div className="text-[10px] sm:text-xs text-gray-500 font-mono bg-gray-100 px-1.5 sm:px-2 py-0.5 rounded-full inline-block mt-0.5">
-                                {cur.code}
-                              </div>
-                            </div>
-                            <span className="text-base sm:text-lg md:text-xl font-black text-gray-900 flex-shrink-0 bg-white px-1.5 sm:px-2 md:px-3 py-1 sm:py-1.5 rounded-lg shadow-md">
-                              {cur.symbol}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Offline Badge */}
-              {isOffline && (
-                <div className="bg-white/10 backdrop-blur-xl border border-white/30 text-white/90 text-xs sm:text-sm px-2 sm:px-3 md:px-4 py-1.5 sm:py-2 rounded-xl font-semibold shadow-xl ring-1 ring-white/20 h-8 sm:h-10 md:h-12 flex items-center justify-center flex-shrink-0 animate-pulse">
-                  <span className="block sm:hidden">📴</span>
-                  <span className="hidden sm:block">📴 Offline</span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Branch Selector */}
-          {branches.length > 0 && (
-            <div className="px-0 pb-4 sm:pb-6 md:pb-8 w-full overflow-x-auto -mx-3 sm:-mx-4 md:-mx-6 lg:-mx-8 px-3 sm:px-4 md:px-6 lg:px-8 scrollbar-thin">
-              <div className="flex gap-2 sm:gap-3 py-2 sm:py-3 md:py-4 min-w-min">
-                {branchElements}
-              </div>
-            </div>
-          )}
-          
-          {/* Stats Cards */}
-          <div className="pb-4 sm:pb-6 md:pb-8 lg:pb-10">
-            {statsCards}
+                <span className="font-bold">{cur.symbol}</span>
+              </button>
+            ))}
           </div>
         </div>
-      </header>
+      </div>
+    </>
+  )}
+
+</header>
+   
       
-      {/* MAIN CONTENT */}
-      <main className="w-full flex-grow">
-        <div className="w-full px-3 sm:px-4 md:px-6 lg:px-8 max-w-7xl mx-auto pb-12 sm:pb-16 pt-4 sm:pt-6">
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4 md:gap-5">
+      {/* MAIN CONTENT - PERFECT GRID */}
+      <main className="w-full flex-grow pb-8 xs:pb-12 sm:pb-16">
+        <div className="w-full px-2 xs:px-3 sm:px-4 md:px-6 lg:px-8 max-w-7xl mx-auto pt-2 xs:pt-4 sm:pt-6">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 xl:grid-cols-6 gap-2 xs:gap-3 sm:gap-4 md:gap-5 auto-rows-fr">
             {menuCards}
           </div>
         </div>
       </main>
 
-      {/* FOOTER - Compact Stylish Black */}
+      {/* FOOTER - PERFECT RESPONSIVE - FIXED CURRENCY ISSUE */}
       <footer className="bg-gradient-to-t from-gray-900/95 via-gray-900/90 to-gray-900/80 text-white/95 border-t border-white/10 backdrop-blur-2xl shadow-2xl">
-        <div className="w-full px-3 sm:px-4 md:px-6 lg:px-8 max-w-7xl mx-auto py-6 sm:py-8">
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-4 sm:gap-6">
-
-            {/* Logo & Branding */}
-            <div className="flex items-center gap-3 sm:gap-4 text-center sm:text-left">
+        <div className="w-full px-2 xs:px-3 sm:px-4 md:px-6 lg:px-8 max-w-7xl mx-auto py-4 xs:py-6 sm:py-8">
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-3 xs:gap-4 sm:gap-6">
+            
+            {/* Logo & Branding - RESPONSIVE */}
+            <div className="flex items-center gap-2 xs:gap-3 sm:gap-4 text-center sm:text-left order-2 sm:order-1 flex-shrink-0">
               <div className="relative flex-shrink-0">
                 <Image
                   src="/stockaro-logo.png"
                   alt="Stockaroo"
-                  width={40}
-                  height={40}
-                  className="object-contain shadow-2xl rounded-xl sm:rounded-2xl w-10 h-10 sm:w-12 sm:h-12 md:w-14 md:h-14 transition-all duration-400 group-hover:scale-110"
+                  width={32}
+                  height={32}
+                  className="w-8 h-8 xs:w-9 xs:h-9 sm:w-10 sm:h-10 md:w-12 md:h-12 lg:w-14 lg:h-14 object-contain shadow-2xl rounded-xl sm:rounded-2xl transition-all duration-400"
                   priority
                 />
               </div>
-              <div>
-                <h3 className="text-xl sm:text-2xl md:text-3xl font-black bg-gradient-to-r from-white via-gray-100 to-gray-200 bg-clip-text text-transparent leading-tight">
+              <div className="min-w-0">
+                <h3 className="text-lg xs:text-xl sm:text-2xl md:text-3xl font-black bg-gradient-to-r from-white via-gray-100 to-gray-200 bg-clip-text text-transparent leading-tight truncate">
                   Stockaroo
                 </h3>
-                <p className="text-xs sm:text-sm md:text-base text-gray-400/80 font-semibold mt-0.5 sm:mt-1">
+                <p className="text-[10px] xs:text-xs sm:text-sm md:text-base text-gray-400/80 font-semibold mt-0.5 xs:mt-1">
                   © {new Date().getFullYear()} All rights reserved
                 </p>
               </div>
             </div>
 
-            {/* Active Branch & Currency */}
-            <div className="flex items-center gap-2 sm:gap-3 md:gap-4 bg-white/5 backdrop-blur-xl border border-white/20 rounded-xl sm:rounded-2xl px-4 sm:px-5 md:px-6 py-3 sm:py-4 shadow-xl w-full sm:w-auto justify-center sm:justify-start">
+            {/* Active Branch & Currency - FIXED & RESPONSIVE */}
+            <div className="flex flex-col xs:flex-row items-center gap-2 xs:gap-3 w-full sm:w-auto justify-center sm:justify-start order-1 sm:order-2 bg-white/5 backdrop-blur-xl border border-white/20 rounded-xl sm:rounded-2xl px-3 xs:px-4 sm:px-5 md:px-6 py-3 xs:py-4 shadow-xl">
               
-              {/* Currency */}
-              <div className="flex items-center gap-1 sm:gap-2 p-1.5 sm:p-2 bg-white/10 rounded-lg sm:rounded-xl border border-white/20 min-w-[50px] sm:min-w-[60px] md:min-w-[70px] justify-center">
-                <span className="text-xl sm:text-2xl md:text-3xl">{currency.flag}</span>
-                <span className="text-lg sm:text-xl md:text-2xl font-black bg-gradient-to-r from-white to-gray-200 bg-clip-text text-transparent">
+              {/* Currency - ALWAYS SHOWS CORRECT */}
+              <div className="flex items-center gap-1 xs:gap-1.5 p-1.5 xs:p-2 bg-white/10 rounded-lg xs:rounded-xl border border-white/20 min-w-[44px] xs:min-w-[50px] sm:min-w-[60px] justify-center flex-shrink-0">
+                <span className="text-lg xs:text-xl sm:text-2xl md:text-3xl flex-shrink-0">{currency.flag}</span>
+                <span className="text-base xs:text-lg sm:text-xl md:text-2xl font-black bg-gradient-to-r from-white to-gray-200 bg-clip-text text-transparent flex-shrink-0">
                   {currency.symbol}
                 </span>
               </div>
 
-              {/* Branch Name */}
-              <div className="flex flex-col items-center sm:items-start min-w-0">
-                <span className="text-[10px] sm:text-xs uppercase tracking-wider text-gray-400 font-semibold bg-white/10 px-1.5 sm:px-2 py-0.5 rounded-full border border-white/20">
+              {/* Branch Name - RESPONSIVE */}
+              <div className="flex flex-col items-center xs:items-start min-w-0 flex-1 max-w-[200px] xs:max-w-[250px] sm:max-w-none">
+                <span className="text-[9px] xs:text-[10px] sm:text-xs uppercase tracking-wider text-gray-400 font-semibold bg-white/10 px-1.5 xs:px-2 py-0.5 rounded-full border border-white/20 flex-shrink-0">
                   Active Branch
                 </span>
-                <span className="text-sm sm:text-base md:text-lg font-black text-white truncate max-w-[150px] sm:max-w-[180px] md:max-w-[200px] bg-gradient-to-r from-gray-100 to-gray-200 bg-clip-text">
+                <span className="text-xs xs:text-sm sm:text-base md:text-lg font-black text-white truncate max-w-full bg-gradient-to-r from-gray-100 to-gray-200 bg-clip-text text-transparent">
                   {activeBranch?.shopName || "Select a Branch"}
                 </span>
               </div>
 
-              {/* Status Indicator */}
+              {/* Status Indicator - RESPONSIVE */}
               {!isOffline ? (
-                <div className="flex items-center gap-1 sm:gap-2 p-1.5 sm:p-2 bg-white/10 rounded-lg sm:rounded-xl border border-white/20">
-                  <div className="w-2 h-2 sm:w-2.5 sm:h-2.5 md:w-3 md:h-3 bg-emerald-400 rounded-full shadow-lg"></div>
-                  <span className="text-xs sm:text-sm font-bold text-white/90 hidden sm:inline">Online</span>
+                <div className="flex items-center gap-1 xs:gap-1.5 p-1.5 xs:p-2 bg-white/10 rounded-lg xs:rounded-xl border border-white/20 flex-shrink-0">
+                  <div className="w-2 h-2 xs:w-2.5 xs:h-2.5 md:w-3 md:h-3 bg-emerald-400 rounded-full shadow-lg flex-shrink-0"></div>
+                  <span className="text-[10px] xs:text-xs sm:text-sm font-bold text-white/90 hidden xs:inline truncate">Online</span>
                 </div>
               ) : (
-                <div className="flex items-center gap-1 sm:gap-2 p-1.5 sm:p-2 bg-white/5 rounded-lg sm:rounded-xl border border-white/20 animate-pulse">
-                  <div className="w-2 h-2 sm:w-2.5 sm:h-2.5 md:w-3 md:h-3 bg-gray-400 rounded-full shadow-lg"></div>
-                  <span className="text-xs sm:text-sm font-bold text-white/70 hidden sm:inline">Offline</span>
+                <div className="flex items-center gap-1 xs:gap-1.5 p-1.5 xs:p-2 bg-white/5 rounded-lg xs:rounded-xl border border-white/20 animate-pulse flex-shrink-0">
+                  <div className="w-2 h-2 xs:w-2.5 xs:h-2.5 md:w-3 md:h-3 bg-gray-400 rounded-full shadow-lg flex-shrink-0"></div>
+                  <span className="text-[10px] xs:text-xs sm:text-sm font-bold text-white/70 hidden xs:inline truncate">Offline</span>
                 </div>
               )}
-
             </div>
           </div>
         </div>
       </footer>
 
-      {/* Global Styles */}
+      {/* Global Styles - PERFECT RESPONSIVE */}
       <style jsx global>{`
-        /* Custom Scrollbar */
+        /* Custom Scrollbar - RESPONSIVE */
         .scrollbar-thin::-webkit-scrollbar {
-          height: 4px;
-          width: 4px;
+          height: 3px;
+          width: 3px;
         }
         .scrollbar-thin::-webkit-scrollbar-track {
           background: rgba(15, 23, 42, 0.4);
@@ -821,7 +762,7 @@ export default function OwnerDashboard() {
           background: rgba(255, 255, 255, 0.5);
         }
         
-        /* Line Clamp */
+        /* Line Clamp - RESPONSIVE */
         .line-clamp-1, .line-clamp-2 {
           display: -webkit-box;
           -webkit-box-orient: vertical;
@@ -855,6 +796,12 @@ export default function OwnerDashboard() {
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
+        }
+
+        /* Extra small breakpoint for very small screens */
+        @media (max-width: 360px) {
+          .xs\\:min-w-\\$44px\\$ { min-width: 44px !important; }
+          .xs\\:min-w-\\$50px\\$ { min-width: 50px !important; }
         }
       `}</style>
     </div>

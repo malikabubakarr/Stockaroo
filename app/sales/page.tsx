@@ -20,6 +20,7 @@ import {
 import { useBranch } from "@/context/BranchContext";
 import Image from "next/image";
 import Link from "next/link";
+import { BrowserMultiFormatReader, DecodeHintType, NotFoundException as ZXingNotFoundException } from '@zxing/library';
 
 // Debug mode - set to false in production
 const DEBUG = false;
@@ -27,27 +28,28 @@ const DEBUG = false;
 interface Product {
   id: string;
   name: string;
+  barcode?: string;
   qty: number;
   saleRate: number;
-  originalSaleRate?: number;  // Original price when product was first added
+  originalSaleRate?: number;
   profit: number;
-  originalProfit?: number;     // Original profit when product was first added
+  originalProfit?: number;
   allowSale: boolean;
   purchaseRate?: number;
-  originalPurchaseRate?: number; // Original purchase rate when product was first added
+  originalPurchaseRate?: number;
 }
 
 interface CartItem {
   id: string;
   name: string;
   qty: number;
-  price: number;           // Original price before discount
-  profit: number;          // Original profit before discount
+  price: number;
+  profit: number;
   purchaseRate?: number;
-  originalPrice?: number;  // Store original price for returns (same as price)
-  originalProfit?: number; // Store original profit for returns (same as profit)
-  effectivePrice?: number; // Price after discount (for accurate returns)
-  effectiveProfit?: number; // Profit after discount (for accurate returns)
+  originalPrice?: number;
+  originalProfit?: number;
+  effectivePrice?: number;
+  effectiveProfit?: number;
 }
 
 interface Sale {
@@ -64,6 +66,8 @@ interface Sale {
   returns?: ReturnRecord[];
   ownerId?: string;
   branchId?: string;
+  currency?: string;
+  currencySymbol?: string;
 }
 
 interface ReturnRecord {
@@ -95,8 +99,8 @@ interface ToastMessage {
 
 interface OfflineSale {
   ownerId: string | null;
-  branchId: string | undefined;
-  createdBy: string | undefined;
+  branchId: string | null;
+  createdBy: string;
   role: "owner" | "employee" | undefined;
   items: CartItem[];
   discount: number;
@@ -105,8 +109,8 @@ interface OfflineSale {
   totalProfit: number;
   currency: string;
   currencySymbol: string;
-  date: any;
-  returns: any[];
+  date: string;
+  returns: ReturnRecord[];
   employeeId?: string | null;
   localId?: number;
 }
@@ -125,13 +129,15 @@ export default function Sales() {
   const [products, setProducts] = useState<Product[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
 
-  const [productId, setProductId] = useState("");
-  const [qty, setQty] = useState("");
-  const [selectedPrice, setSelectedPrice] = useState<number | null>(null);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [qty, setQty] = useState("1");
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   
-  // Debounced search
   const [debouncedSearch, setDebouncedSearch] = useState("");
-
+  const [isScanning, setIsScanning] = useState(false);
+  const [isCameraActive, setIsCameraActive] = useState(false);
+  const [cameraError, setCameraError] = useState("");
+  
   const [cart, setCart] = useState<CartItem[]>([]);
   const [discount, setDiscount] = useState(0);
   const [discountType, setDiscountType] = useState<"flat" | "percent">("flat");
@@ -143,7 +149,6 @@ export default function Sales() {
 
   const [currentUser, setCurrentUser] = useState<{ name: string; role: "owner" | "employee" } | null>(null);
   
-  // Currency state
   const [currency, setCurrency] = useState<CurrencyOption>({
     symbol: "$",
     code: "USD",
@@ -151,11 +156,14 @@ export default function Sales() {
     flag: "🇺🇸"
   });
 
-  // Refs to prevent unnecessary effects
+  // Scanner refs
   const initialLoadDone = useRef(false);
   const syncInProgress = useRef(false);
+  const scanTimeoutRef = useRef<NodeJS.Timeout>();
+  const codeReaderRef = useRef<BrowserMultiFormatReader>();
+  const scannerContainerRef = useRef<HTMLDivElement>(null);
+  const isProcessingScan = useRef(false);
 
-  // Currency list
   const currencies: CurrencyOption[] = [
     { symbol: "₨", code: "PKR", name: "Pakistani Rupee", flag: "🇵🇰" },
     { symbol: "$", code: "USD", name: "US Dollar", flag: "🇺🇸" },
@@ -188,13 +196,13 @@ export default function Sales() {
     setToast({ type, title, message });
   };
 
-  // Debounce search input
+  // ✅ FIX: Debounce search input for product search
   useEffect(() => {
     const timer = setTimeout(() => {
-      setDebouncedSearch(productId);
+      setDebouncedSearch(searchTerm);
     }, 300);
     return () => clearTimeout(timer);
-  }, [productId]);
+  }, [searchTerm]);
 
   /* ---------------- ONLINE / OFFLINE DETECTION & SYNC ---------------- */
   useEffect(() => {
@@ -234,7 +242,7 @@ export default function Sales() {
 
           for (const sale of offlineSales) {
             try {
-              const saleData = { ...sale };
+              const saleData = { ...sale } as any;
               delete saleData.localId;
               saleData.date = serverTimestamp();
               
@@ -345,6 +353,7 @@ export default function Sales() {
       const list: Product[] = snap.docs.map((d) => ({
         id: d.id,
         name: d.data().name,
+        barcode: d.data().barcode || '',
         qty: d.data().qty,
         saleRate: d.data().saleRate,
         originalSaleRate: d.data().originalSaleRate || d.data().saleRate,
@@ -374,7 +383,7 @@ export default function Sales() {
       where("ownerId", "==", ownerId),
       where("branchId", "==", activeBranch.id),
       orderBy("date", "desc"),
-      limit(20) // 🔥 Only load recent 20 for performance
+      limit(20)
     );
 
     const unsub = onSnapshot(q, (snap) => {
@@ -412,13 +421,225 @@ export default function Sales() {
     return () => unsub();
   }, [ownerId, activeBranch?.id, isLoading]);
 
-  // Memoized search results using debounced search
+  // ✅ FAST BARCODE HANDLER - Auto adds with quantity 1
+  const handleBarcodeInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    if (isProcessingScan.current) return;
+    
+    const value = e.target.value.trim();
+    if (!value) return;
+
+    isProcessingScan.current = true;
+    setSearchTerm(value);
+    setIsScanning(true);
+
+    // Clear previous timeout
+    if (scanTimeoutRef.current) {
+      clearTimeout(scanTimeoutRef.current);
+    }
+
+    // Scanners send rapid input, detect pause as "scan complete"
+    scanTimeoutRef.current = setTimeout(() => {
+      setIsScanning(false);
+      
+      // 🔍 AUTO-FIND PRODUCT
+      const product = products.find(p => 
+        p.barcode === value || 
+        p.name.toLowerCase().includes(value.toLowerCase()) ||
+        p.id === value
+      );
+
+      if (product) {
+        // ✅ AUTO ADD WITH QUANTITY 1
+        if (product.qty >= 1 && product.allowSale) {
+          setSelectedProduct(product);
+          
+          // Auto add to cart with quantity 1
+          setCart((prev) => {
+            const existing = prev.find((c) => c.id === product.id);
+            if (existing) {
+              if (existing.qty + 1 <= product.qty) {
+                showToast('success', '🛒 Scanned & Added', `${product.name} (+1)`);
+                return prev.map((c) =>
+                  c.id === product.id ? { ...c, qty: c.qty + 1 } : c
+                );
+              } else {
+                showToast('error', 'Stock Limit', `Cannot exceed stock: ${product.qty}`);
+                return prev;
+              }
+            }
+            showToast('success', '🛒 Scanned & Added', `${product.name}`);
+            return [...prev, { 
+              id: product.id, 
+              name: product.name, 
+              qty: 1, 
+              price: product.saleRate,
+              profit: product.profit,
+              purchaseRate: product.purchaseRate,
+              originalPrice: product.saleRate,
+              originalProfit: product.profit,
+              effectivePrice: product.saleRate,
+              effectiveProfit: product.profit,
+            }];
+          });
+          
+          setSearchTerm("");
+          setQty("1");
+        } else if (product.qty < 1) {
+          showToast('error', 'Out of Stock', `${product.name} is out of stock`);
+        } else if (!product.allowSale) {
+          showToast('error', 'Not for Sale', `${product.name} cannot be sold`);
+        }
+      } else {
+        showToast('warning', '❌ Not Found', `No product with barcode/name: "${value}"`);
+        setSearchTerm("");
+      }
+      
+      isProcessingScan.current = false;
+    }, 120);
+  }, [products]);
+
+  // ✅ MOBILE CAMERA SCANNER - Auto adds with quantity 1
+  const startCameraScan = useCallback(async () => {
+    try {
+      if (!scannerContainerRef.current) return;
+      
+      setCameraError("");
+      setIsCameraActive(true);
+      
+      // Clear previous video element if exists
+      scannerContainerRef.current.innerHTML = '';
+      
+      // Create video element for scanner
+      const videoElement = document.createElement('video');
+      videoElement.style.width = '100%';
+      videoElement.style.height = '100%';
+      videoElement.style.objectFit = 'cover';
+      scannerContainerRef.current.appendChild(videoElement);
+      
+      const codeReader = new BrowserMultiFormatReader();
+      codeReaderRef.current = codeReader;
+      
+      const hints = new Map();
+      hints.set(DecodeHintType.POSSIBLE_FORMATS, ['CODE_128', 'EAN_13', 'EAN_8', 'UPC_A', 'UPC_E', 'QR_CODE']);
+      
+      await codeReader.decodeFromVideoDevice(
+        null,
+        videoElement,
+        (result, err) => {
+          if (result) {
+            const barcode = result.getText();
+            codeReader.reset();
+            setIsCameraActive(false);
+            setSearchTerm(barcode);
+            
+            // Process scanned barcode - Auto add with quantity 1
+            const product = products.find(p => p.barcode === barcode);
+            if (product) {
+              if (product.qty >= 1 && product.allowSale) {
+                setSelectedProduct(product);
+                
+                // Auto add to cart with quantity 1
+                setCart((prev) => {
+                  const existing = prev.find((c) => c.id === product.id);
+                  if (existing) {
+                    if (existing.qty + 1 <= product.qty) {
+                      showToast('success', '📱 Scanned & Added', `${product.name} (+1)`);
+                      return prev.map((c) =>
+                        c.id === product.id ? { ...c, qty: c.qty + 1 } : c
+                      );
+                    } else {
+                      showToast('error', 'Stock Limit', `Cannot exceed stock: ${product.qty}`);
+                      return prev;
+                    }
+                  }
+                  showToast('success', '📱 Scanned & Added', `${product.name}`);
+                  return [...prev, { 
+                    id: product.id, 
+                    name: product.name, 
+                    qty: 1, 
+                    price: product.saleRate,
+                    profit: product.profit,
+                    purchaseRate: product.purchaseRate,
+                    originalPrice: product.saleRate,
+                    originalProfit: product.profit,
+                    effectivePrice: product.saleRate,
+                    effectiveProfit: product.profit,
+                  }];
+                });
+                
+                setSearchTerm("");
+                setQty("1");
+              } else if (product.qty < 1) {
+                showToast('error', 'Out of Stock', `${product.name} is out of stock`);
+              } else if (!product.allowSale) {
+                showToast('error', 'Not for Sale', `${product.name} cannot be sold`);
+              }
+            } else {
+              showToast('warning', '📱 Not Found', `No product with barcode: ${barcode}`);
+              setSearchTerm("");
+            }
+          }
+          if (err && !(err instanceof ZXingNotFoundException)) {
+            console.error(err);
+          }
+        }
+      );
+      
+      // Auto-stop after 30s
+      setTimeout(() => {
+        if (codeReaderRef.current) {
+          codeReaderRef.current.reset();
+          setIsCameraActive(false);
+        }
+      }, 30000);
+      
+    } catch (error: any) {
+      setCameraError(error.message || 'Camera access denied');
+      setIsCameraActive(false);
+      showToast('error', 'Camera Error', error.message || 'Cannot access camera');
+    }
+  }, [products]);
+
+  // Cleanup effect
+  useEffect(() => {
+    return () => {
+      if (scanTimeoutRef.current) {
+        clearTimeout(scanTimeoutRef.current);
+      }
+      if (codeReaderRef.current) {
+        codeReaderRef.current.reset();
+      }
+      isProcessingScan.current = false;
+    };
+  }, []);
+
+  // ✅ FIX: Enhanced search with barcode support - now works with debouncedSearch
   const searchResults = useMemo(() => {
-    if (!debouncedSearch) return [];
+    if (!debouncedSearch || debouncedSearch.trim() === "") return [];
+    const searchLower = debouncedSearch.toLowerCase();
     return products
-      .filter(p => p.name.toLowerCase().includes(debouncedSearch.toLowerCase()) && p.allowSale)
+      .filter(p => 
+        p.name.toLowerCase().includes(searchLower) || 
+        (p.barcode && p.barcode.includes(debouncedSearch)) ||
+        p.id === debouncedSearch
+      )
+      .filter(p => p.allowSale)
       .slice(0, 10);
   }, [products, debouncedSearch]);
+
+  // ✅ FIX: Handle product selection from search results
+  const handleProductSelect = useCallback((product: Product) => {
+    setSelectedProduct(product);
+    setSearchTerm(product.name);
+    setDebouncedSearch(product.name);
+  }, []);
+
+  // ✅ FIX: Clear search and selected product
+  const clearSearch = useCallback(() => {
+    setSearchTerm("");
+    setDebouncedSearch("");
+    setSelectedProduct(null);
+  }, []);
 
   // Memoized calculations
   const totals = useMemo(() => {
@@ -441,15 +662,19 @@ export default function Sales() {
     };
   }, [cart, discount, discountType]);
 
-  // Add to cart - memoized
   const addToCart = useCallback(() => {
-    const product = products.find((p) => p.name.toLowerCase() === productId.toLowerCase());
+    const product = selectedProduct || products.find((p) => 
+      p.name.toLowerCase() === searchTerm.toLowerCase() ||
+      p.barcode === searchTerm ||
+      p.id === searchTerm
+    );
+    
     if (!product) {
-      showToast('error', 'Product Not Found', 'Please check the product name and try again');
+      showToast('error', 'Product Not Found', `No product: "${searchTerm}"`);
       return;
     }
 
-    const quantity = Number(qty);
+    const quantity = Number(qty) || 1;
     if (quantity <= 0) {
       showToast('error', 'Invalid Quantity', 'Please enter a valid quantity');
       return;
@@ -489,17 +714,16 @@ export default function Sales() {
         price: product.saleRate,
         profit: product.profit,
         purchaseRate: product.purchaseRate,
-        originalPrice: product.saleRate,           // Store original price for returns
-        originalProfit: product.profit,             // Store original profit for returns
-        effectivePrice: product.saleRate,          // Initially same as price (will be updated if discount applied)
-        effectiveProfit: product.profit,            // Initially same as profit (will be updated if discount applied)
+        originalPrice: product.saleRate,
+        originalProfit: product.profit,
+        effectivePrice: product.saleRate,
+        effectiveProfit: product.profit,
       }];
     });
 
-    setProductId("");
-    setQty("");
-    setSelectedPrice(null);
-  }, [products, productId, qty]);
+    clearSearch();
+    setQty("1");
+  }, [products, searchTerm, qty, selectedProduct, clearSearch]);
 
   const removeFromCart = useCallback((id: string) => {
     const item = cart.find(c => c.id === id);
@@ -538,7 +762,6 @@ export default function Sales() {
     setConfirmSale(false);
 
     try {
-      // Calculate effective prices per item based on discount
       const totalItemsPrice = cart.reduce((sum, c) => sum + c.price * c.qty, 0);
       let discountPerItemRatio = 0;
       
@@ -546,7 +769,6 @@ export default function Sales() {
         discountPerItemRatio = totals.discountAmount / totalItemsPrice;
       }
       
-      // Update cart items with effective prices after discount
       const updatedCartItems = cart.map(item => {
         const itemTotalPrice = item.price * item.qty;
         const itemDiscount = itemTotalPrice * discountPerItemRatio;
@@ -560,15 +782,14 @@ export default function Sales() {
         };
       });
 
-      // If offline, save to localStorage
       if (isOffline) {
         const offlineSalesJson = localStorage.getItem("offlineSales");
         const offlineSales: OfflineSale[] = offlineSalesJson ? JSON.parse(offlineSalesJson) : [];
 
         const saleData: OfflineSale = {
           ownerId,
-          branchId: activeBranch?.id,
-          createdBy: currentUser?.name,
+          branchId: activeBranch?.id || null,
+          createdBy: currentUser?.name || '',
           role: currentUser?.role,
           items: updatedCartItems,
           discount: totals.discountAmount,
@@ -598,24 +819,19 @@ export default function Sales() {
         return;
       }
 
-      // Online - use Promise.all with increment for better performance
       const updates = cart.map(async (item) => {
         const productRef = doc(db, "products", item.id);
-        // Use increment instead of read + update
-        await updateDoc(productRef, { 
-          qty: increment(-item.qty) 
-        });
+        await updateDoc(productRef, { qty: increment(-item.qty) });
       });
 
       await Promise.all(updates);
 
-      // Create sale object with all necessary fields including effective prices
       const saleData: any = {
         ownerId,
         branchId: activeBranch?.id,
         createdBy: currentUser?.name,
         role: currentUser?.role,
-        items: updatedCartItems, // Use updated items with effective prices
+        items: updatedCartItems,
         discount: totals.discountAmount,
         discountType,
         totalAmount: totals.finalPrice,
@@ -626,7 +842,6 @@ export default function Sales() {
         returns: [],
       };
 
-      // Add employeeId if the user is an employee
       if (currentUser?.role === 'employee' && employeeId) {
         saleData.employeeId = employeeId;
       }
@@ -646,30 +861,22 @@ export default function Sales() {
     }
   }, [cart, totals, isOffline, ownerId, activeBranch?.id, currentUser, employeeId, currency, discountType]);
 
-  // Return Item - memoized (UPDATED to use effective prices)
+  // Return Item
   const returnItem = useCallback(async (sale: Sale, item: CartItem) => {
     if (DEBUG) console.log("=== RETURN ATTEMPT START ===");
-    if (DEBUG) console.log("Sale from state:", sale);
-    if (DEBUG) console.log("Item:", item);
     
-    // Get current user and ensure we have ownerId
     const user = auth.currentUser;
     if (!user) {
-      if (DEBUG) console.log("No authenticated user");
       showToast('error', 'Authentication Error', 'Please log in again');
       return;
     }
 
-    // Ensure we have ownerId and branchId
     if (!ownerId || !activeBranch?.id) {
-      if (DEBUG) console.log("Missing configuration:", { ownerId, branchId: activeBranch?.id });
       showToast('error', 'Configuration Error', 'Missing owner or branch information');
       return;
     }
 
-    // Ensure we have current user info
     if (!currentUser) {
-      if (DEBUG) console.log("No current user info");
       showToast('error', 'User Error', 'Could not identify current user');
       return;
     }
@@ -677,9 +884,6 @@ export default function Sales() {
     const key = `${sale.id}_${item.id}`;
     const qtyReturn = returnQty[key];
     
-    if (DEBUG) console.log('Return quantity:', { key, qtyReturn, availableQty: item.qty });
-    
-    // Validate return quantity
     if (!qtyReturn || qtyReturn <= 0) {
       showToast('error', 'Invalid Quantity', 'Please enter a valid return quantity');
       return;
@@ -693,61 +897,42 @@ export default function Sales() {
     setIsReturnProcessing(true);
 
     try {
-      if (DEBUG) console.log("Starting transaction...");
-      
       await runTransaction(db, async (transaction) => {
-        // Get references
         const saleRef = doc(db, "sales", sale.id);
         const productRef = doc(db, "products", item.id);
         
-        if (DEBUG) console.log("Getting sale document:", sale.id);
-        // Get the sale document
         const saleSnap = await transaction.get(saleRef);
         if (!saleSnap.exists()) {
           throw new Error("Sale record not found");
         }
         
         const saleData = saleSnap.data();
-        if (DEBUG) console.log("Sale data from DB:", saleData);
         
-        // Verify the sale belongs to this owner's business
         if (!saleData.ownerId) {
-          if (DEBUG) console.log("ERROR: Sale has no ownerId field!");
           throw new Error("Sale record is missing owner information");
         }
         
         if (currentUser?.role === "employee") {
-          // Employee can only return their own sale
           if (saleData.employeeId !== employeeId) {
             throw new Error("You don't have permission to modify this sale");
           }
         } else if (currentUser?.role === "owner") {
-          // Owner can return any sale in their store
           if (saleData.ownerId !== ownerId) {
             throw new Error("This sale does not belong to your store");
           }
         }
         
-        if (DEBUG) console.log("Getting product document:", item.id);
-        // Get the product document
         const productSnap = await transaction.get(productRef);
         if (!productSnap.exists()) {
           throw new Error("Product not found in inventory");
         }
         
         const productData = productSnap.data();
-        if (DEBUG) console.log("Product data from DB:", productData);
         
-        // Verify product belongs to correct branch
         if (productData.branchId !== activeBranch.id) {
-          if (DEBUG) console.log("Branch mismatch:", { 
-            productBranch: productData.branchId, 
-            activeBranch: activeBranch.id 
-          });
           throw new Error("Product belongs to a different branch");
         }
         
-        // Update items array
         const items = [...(saleData.items || [])];
         const itemIndex = items.findIndex((i: any) => i.id === item.id);
         
@@ -755,58 +940,28 @@ export default function Sales() {
           throw new Error("Item not found in sale");
         }
         
-        // Store original item for calculations
         const originalItem = items[itemIndex];
-        if (DEBUG) console.log("Original item:", originalItem);
-        
-        // 🔥 CRITICAL CHANGE: Use effective price and profit for returns
-        // This ensures returns use the discounted prices, not original prices
         const effectivePrice = originalItem.effectivePrice || originalItem.price;
         const effectiveProfit = originalItem.effectiveProfit || originalItem.profit;
         
-        // Calculate return amounts using effective prices
         const returnAmount = effectivePrice * qtyReturn;
         const returnProfitAmount = effectiveProfit * qtyReturn;
         
-        if (DEBUG) console.log("Return calculations (using effective prices):", { 
-          effectivePrice, 
-          effectiveProfit, 
-          returnAmount, 
-          returnProfitAmount 
-        });
-        
-        // Update quantity or remove item
         if (originalItem.qty === qtyReturn) {
-          // Remove item completely
           items.splice(itemIndex, 1);
         } else {
-          // Reduce quantity
           items[itemIndex] = {
             ...originalItem,
             qty: originalItem.qty - qtyReturn
           };
         }
         
-        // Calculate new totals using effective prices
         const newTotalAmount = (saleData.totalAmount || 0) - returnAmount;
         const newTotalProfit = (saleData.totalProfit || 0) - returnProfitAmount;
         
-        if (DEBUG) console.log("New totals:", { newTotalAmount, newTotalProfit });
+        transaction.update(productRef, { qty: increment(qtyReturn) });
         
-        // Update product stock
-        const currentStock = productData.qty || 0;
-        if (DEBUG) console.log("Updating product stock:", { 
-          currentStock, 
-          addStock: qtyReturn, 
-          newStock: currentStock + qtyReturn 
-        });
-        
-        transaction.update(productRef, { 
-          qty: increment(qtyReturn) 
-        });
-        
-        // Create return record with effective amounts
-        const returnRecord = {
+        const returnRecord: ReturnRecord = {
           itemId: item.id,
           itemName: item.name,
           quantity: qtyReturn,
@@ -820,49 +975,36 @@ export default function Sales() {
           ownerId: ownerId
         };
         
-        if (DEBUG) console.log("Return record:", returnRecord);
-        
-        // Update sale record
         const updates: any = {
           items: items,
           totalAmount: newTotalAmount,
           totalProfit: newTotalProfit,
         };
         
-        // Only add returns array if it exists or create new one
         if (saleData.returns) {
           updates.returns = [...saleData.returns, returnRecord];
         } else {
           updates.returns = [returnRecord];
         }
         
-        if (DEBUG) console.log("Updating sale with:", updates);
         transaction.update(saleRef, updates);
       });
-
-      if (DEBUG) console.log("Transaction completed successfully");
       
-      // Clear the return quantity for this item
       setReturnQty((prev) => {
         const newState = { ...prev };
         delete newState[key];
         return newState;
       });
       
-      showToast('success', 'Return Completed', 
-        `Successfully returned ${qtyReturn} ${item.name}`
-      );
+      showToast('success', 'Return Completed', `Successfully returned ${qtyReturn} ${item.name}`);
       
     } catch (err) {
       if (DEBUG) console.error("Return error:", err);
-      showToast('error', 'Return Failed', 
-        err instanceof Error ? err.message : 'An unknown error occurred'
-      );
+      showToast('error', 'Return Failed', err instanceof Error ? err.message : 'An unknown error occurred');
     } finally {
       setIsReturnProcessing(false);
-      if (DEBUG) console.log("=== RETURN ATTEMPT END ===");
     }
-  }, [ownerId, activeBranch?.id, currentUser, employeeId, currency, returnQty]);
+  }, [ownerId, activeBranch?.id, currentUser, employeeId, returnQty]);
 
   const getInitials = (name: string) =>
     name
@@ -975,7 +1117,6 @@ export default function Sales() {
               </div>
             </div>
             
-            {/* Dashboard Link */}
             <Link 
               href="/owner-dashboard"
               className="flex items-center gap-2 bg-white/10 hover:bg-white/20 backdrop-blur-xl px-4 py-2 rounded-xl border border-white/30 hover:border-white/50 text-white font-semibold text-sm shadow-xl transition-all duration-300"
@@ -1020,77 +1161,233 @@ export default function Sales() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
           {/* Left Column - POS Interface */}
           <div className="space-y-6">
-            {/* Product Search Card */}
+            {/* Scanner Search Card */}
             <div className="bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border border-gray-200/60 p-6">
-              <h2 className="text-xl font-bold text-gray-900 mb-4">Add Items</h2>
+              <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+                <div className="p-2 bg-gradient-to-br from-blue-500 to-purple-600 text-white rounded-2xl shadow-lg">
+                  <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M3.707 2.293a1 1 0 00-1.414 1.414l4 4A1 1 0 006 7h.707l4-4A1 1 0 0010.707 2H6A1 1 0 005.707 2.293zM17 11a1 1 0 01-1 1h-3.707l-4 4A1 1 0 008 18H3a1 1 0 01-.707-1.707l4-4A1 1 0 017 13H3a1 1 0 01-1-1V7a1 1 0 011-1h13a1 1 0 011 1v4z"/>
+                  </svg>
+                </div>
+                Search & Scan
+              </h2>
               
               <div className="space-y-4">
+                {/* ✅ FIX: Product Search Input with working name search */}
                 <div className="relative">
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    Search Product
+                  <label className="block text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
+                    <span>🔍 Search Product by Name or Barcode</span>
+                    {selectedProduct && (
+                      <span className="px-2 py-1 bg-green-100 text-green-800 rounded-full text-xs font-semibold">
+                        Selected: {selectedProduct.name}
+                      </span>
+                    )}
                   </label>
+                  
                   <input
                     type="text"
-                    placeholder="Type to search..."
-                    className="w-full px-4 py-3 rounded-xl border border-gray-300 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 outline-none transition-all duration-300 text-gray-900 placeholder-gray-400"
-                    value={productId}
-                    onChange={(e) => setProductId(e.target.value)}
+                    placeholder="Type product name or scan barcode..."
+                    className={`w-full px-5 py-4 rounded-2xl border-2 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/20 outline-none transition-all duration-300 text-lg font-semibold text-gray-900 placeholder-gray-400 ${
+                      isScanning 
+                        ? 'border-green-400 bg-green-50 ring-2 ring-green-200/50' 
+                        : 'border-gray-300 hover:border-gray-400'
+                    }`}
+                    value={searchTerm}
+                    onChange={(e) => {
+                      setSearchTerm(e.target.value);
+                      setSelectedProduct(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && selectedProduct) {
+                        addToCart();
+                      }
+                    }}
+                    autoFocus
                   />
                   
-                  {debouncedSearch && searchResults.length > 0 && (
-                    <div className="absolute z-50 w-full mt-2 bg-white rounded-xl shadow-2xl border border-gray-200 max-h-60 overflow-y-auto">
+                  {/* ✅ FIX: Search Results Dropdown - Now shows products by name */}
+                  {debouncedSearch && searchResults.length > 0 && !selectedProduct && (
+                    <div className="absolute z-50 w-full mt-2 bg-white rounded-xl shadow-2xl border border-gray-200 max-h-80 overflow-y-auto">
                       {searchResults.map(p => (
                         <div
                           key={p.id}
-                          className="p-3 hover:bg-gray-50 cursor-pointer border-b border-gray-100 last:border-0 transition-colors"
-                          onClick={() => {
-                            setProductId(p.name);
-                            setSelectedPrice(p.saleRate);
-                          }}
+                          className="p-4 hover:bg-gray-50 cursor-pointer border-b border-gray-100 last:border-0 transition-all duration-200"
+                          onClick={() => handleProductSelect(p)}
                         >
-                          <div className="font-medium text-gray-900">{p.name}</div>
-                          <div className="text-xs text-gray-500 mt-1">
-                            Stock: {p.qty} | Rate: {currency.symbol}{p.saleRate}
-                            {p.profit < 0 && (
-                              <span className="ml-2 text-red-500">⚠️ Negative Profit</span>
-                            )}
+                          <div className="flex justify-between items-start">
+                            <div className="flex-1">
+                              <div className="font-bold text-gray-900 text-lg">{p.name}</div>
+                              <div className="text-sm text-gray-500 mt-1 flex flex-wrap gap-2">
+                                {p.barcode && <span className="bg-gray-100 px-2 py-0.5 rounded">📦 {p.barcode}</span>}
+                                <span>📊 Stock: {p.qty}</span>
+                                <span>💰 {currency.symbol}{p.saleRate.toLocaleString()}</span>
+                                <span className={p.profit >= 0 ? 'text-green-600' : 'text-red-600'}>
+                                  Profit: {currency.symbol}{p.profit.toLocaleString()}
+                                </span>
+                              </div>
+                            </div>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleProductSelect(p);
+                                setTimeout(() => addToCart(), 100);
+                              }}
+                              className="ml-3 px-4 py-2 bg-gradient-to-r from-emerald-500 to-emerald-600 text-white text-sm font-bold rounded-lg hover:shadow-lg transition-all"
+                            >
+                              Add
+                            </button>
                           </div>
                         </div>
                       ))}
                     </div>
                   )}
+                  
+                  {debouncedSearch && searchResults.length === 0 && !selectedProduct && (
+                    <div className="absolute z-50 w-full mt-2 bg-white rounded-xl shadow-2xl border border-gray-200 p-4 text-center text-gray-500">
+                      No products found matching "{debouncedSearch}"
+                    </div>
+                  )}
                 </div>
 
-                {selectedPrice && (
-                  <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
-                    <div className="text-sm text-gray-600">Selected Price:</div>
-                    <div className="text-2xl font-bold text-gray-900">
-                      {currency.symbol}{formatCurrency(selectedPrice)}
+                {/* Quick Quantity Buttons */}
+                <div className="grid grid-cols-5 gap-2">
+                  {[1,2,3,5,10].map(n => (
+                    <button
+                      key={n}
+                      onClick={() => setQty(n.toString())}
+                      className={`p-3 font-bold rounded-xl shadow-lg hover:shadow-xl transition-all duration-200 hover:scale-105 text-sm ${
+                        Number(qty) === n
+                          ? 'bg-gradient-to-r from-emerald-500 to-emerald-600 text-white'
+                          : 'bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white'
+                      }`}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Mobile Camera Scanner */}
+                <div className="grid md:grid-cols-2 gap-3">
+                  <button
+                    onClick={startCameraScan}
+                    disabled={isCameraActive}
+                    className={`w-full p-4 rounded-2xl font-bold text-lg shadow-xl transition-all duration-300 flex items-center justify-center gap-3 ${
+                      isCameraActive
+                        ? 'bg-gray-400 text-gray-600 cursor-not-allowed'
+                        : 'bg-gradient-to-r from-purple-500 to-pink-600 hover:from-purple-600 hover:to-pink-700 text-white hover:shadow-2xl hover:scale-[1.02]'
+                    }`}
+                  >
+                    {isCameraActive ? (
+                      <>
+                        <div className="w-6 h-6 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                        Scanning...
+                      </>
+                    ) : (
+                      <>
+                        📱 <span>Camera Scan</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    onClick={addToCart}
+                    disabled={!selectedProduct || !qty || isProcessing}
+                    className="w-full bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white font-bold py-4 px-6 rounded-2xl shadow-xl hover:shadow-2xl transition-all duration-300 transform hover:scale-[1.02] text-lg disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
+                  >
+                    {isProcessing ? (
+                      <>
+                        <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+                        Processing...
+                      </>
+                    ) : (
+                      `➕ Add ${qty} ${selectedProduct ? selectedProduct.name : 'Product'}`
+                    )}
+                  </button>
+                </div>
+
+                {/* Selected Product Display */}
+                {selectedProduct && (
+                  <div className="bg-gradient-to-r from-emerald-50 to-green-50 p-4 rounded-2xl border-2 border-emerald-200">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div>
+                        <span className="text-sm font-semibold text-emerald-800">✅ Selected Product</span>
+                        <div className="text-lg font-bold text-gray-900">{selectedProduct.name}</div>
+                        <div className="text-sm text-gray-600 mt-1">
+                          Stock: {selectedProduct.qty} | Rate: {currency.symbol}{selectedProduct.saleRate.toLocaleString()}
+                        </div>
+                      </div>
+                      <div className="text-2xl font-bold text-emerald-700">
+                        {currency.symbol}{selectedProduct.saleRate.toLocaleString()}
+                      </div>
                     </div>
                   </div>
                 )}
 
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    Quantity
-                  </label>
-                  <input
-                    type="number"
-                    inputMode="numeric"
-                    placeholder="0"
-                    className="w-full px-4 py-4 rounded-xl border border-gray-300 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 outline-none transition-all duration-300 text-2xl text-center font-bold text-gray-900"
-                    value={qty}
-                    onChange={(e) => setQty(e.target.value)}
-                  />
-                </div>
+                {/* Camera Modal */}
+                {isCameraActive && (
+                  <div className="fixed inset-0 bg-black/90 backdrop-blur-sm flex items-center justify-center z-[100] p-4 animate-in slide-in-from-bottom-4">
+                    <div className="bg-white rounded-3xl max-w-lg w-full max-h-[90vh] overflow-hidden shadow-2xl">
+                      <div className="bg-gradient-to-r from-purple-500 to-pink-600 text-white p-6 text-center">
+                        <div className="flex items-center justify-center gap-3 mb-2">
+                          <div className="w-3 h-3 bg-green-400 rounded-full animate-ping"></div>
+                          <h3 className="text-2xl font-bold">📱 Camera Scanner</h3>
+                        </div>
+                        <p className="text-purple-100 text-sm opacity-90">
+                          Point at barcode - Auto adds to cart!
+                        </p>
+                      </div>
 
-                <button
-                  onClick={addToCart}
-                  disabled={isProcessing}
-                  className="w-full bg-gradient-to-r from-gray-900 to-gray-800 hover:from-gray-800 hover:to-gray-700 text-white font-bold py-4 px-6 rounded-xl shadow-xl hover:shadow-2xl transition-all duration-300 transform hover:scale-[1.02] active:scale-[0.98] text-lg disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
-                >
-                  {isProcessing ? 'Processing...' : 'Add to Cart ➕'}
-                </button>
+                      <div className="p-6 bg-gray-50">
+                        <div ref={scannerContainerRef} className="relative w-full aspect-video max-h-96 mx-auto rounded-2xl overflow-hidden shadow-xl border-4 border-purple-200/50">
+                          <div className="absolute inset-0 bg-gradient-to-t from-black/20 to-transparent pointer-events-none">
+                            <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-[280px] h-1 bg-gradient-to-r from-green-400 via-emerald-400 to-green-400 rounded-full animate-pulse shadow-lg"></div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="p-6 space-y-4 bg-gray-50 border-t">
+                        <div className="text-center text-sm text-gray-600">
+                          Found: <span className="font-mono bg-gray-200 px-2 py-1 rounded text-purple-600 font-semibold">{searchTerm || 'Scanning...'}</span>
+                        </div>
+                        
+                        <div className="flex gap-3 pt-2">
+                          <button
+                            onClick={() => {
+                              if (codeReaderRef.current) {
+                                codeReaderRef.current.reset();
+                              }
+                              setIsCameraActive(false);
+                            }}
+                            className="flex-1 py-4 px-6 bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold rounded-2xl transition-all duration-200 shadow-sm hover:shadow-md"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            onClick={() => {
+                              setIsCameraActive(false);
+                            }}
+                            className="flex-1 py-4 px-6 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white font-bold rounded-2xl shadow-lg hover:shadow-xl transition-all duration-200"
+                          >
+                            Close
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Camera Error */}
+                {cameraError && (
+                  <div className="p-4 bg-red-50 border border-red-200 rounded-2xl">
+                    <div className="flex items-start gap-3">
+                      <div className="text-2xl text-red-500 mt-0.5">⚠️</div>
+                      <div>
+                        <p className="font-semibold text-red-800">{cameraError}</p>
+                        <p className="text-sm text-red-600 mt-1">Try USB scanner or check camera permissions</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -1107,6 +1404,7 @@ export default function Sales() {
                 <div className="text-center py-12">
                   <div className="text-6xl mb-4">🛒</div>
                   <p className="text-gray-400 font-medium">Cart is empty</p>
+                  <p className="text-sm text-gray-400 mt-2">Search for products or scan barcodes to add items!</p>
                 </div>
               ) : (
                 <div className="space-y-3 max-h-96 overflow-y-auto pr-2">
