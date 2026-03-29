@@ -65,7 +65,6 @@ const StatsCard = memo(({
 
   return (
     <div className="group relative bg-gradient-to-b from-gray-900/95 to-gray-800/90 backdrop-blur-xl p-2 xs:p-3 sm:p-4 rounded-xl border border-white/10 shadow-2xl hover:shadow-3xl hover:-translate-y-0.5 transition-all duration-300 overflow-hidden h-full flex flex-col justify-between min-h-[80px] xs:min-h-[90px] sm:min-h-[100px]">
-      {/* Shine effect - Responsive */}
       <div className="absolute inset-0 bg-gradient-to-r from-white/10 via-transparent to-white/5 opacity-0 group-hover:opacity-100 transition-opacity duration-500 -skew-x-12 -translate-x-32 group-hover:translate-x-32 pointer-events-none"></div>
       
       <div className="relative z-10 flex items-center justify-between mb-1 xs:mb-1.5 sm:mb-2">
@@ -116,6 +115,10 @@ export default function OwnerDashboard() {
     flag: "🇺🇸"
   });
   const [updatingCurrency, setUpdatingCurrency] = useState(false);
+  
+  // Stats for invoice and credit blocks
+  const [invoiceCount, setInvoiceCount] = useState(0);
+  const [creditCount, setCreditCount] = useState(0);
 
   // Currency list
   const currencies: CurrencyOption[] = [
@@ -373,6 +376,43 @@ export default function OwnerDashboard() {
     return () => unsubscribe();
   }, [activeBranch?.id, currentUser?.uid]);
 
+  /* ---------------- LOAD INVOICE AND CREDIT COUNTS ---------------- */
+  useEffect(() => {
+    if (!activeBranch?.id || !currentUser?.uid) return;
+
+    const ownerId = currentUser.uid;
+    const branchId = activeBranch.id;
+
+    // Count all invoices
+    const invoicesQuery = query(
+      collection(db, "invoices"),
+      where("ownerId", "==", ownerId),
+      where("branchId", "==", branchId)
+    );
+
+    const unsubscribeInvoices = onSnapshot(invoicesQuery, (snap) => {
+      setInvoiceCount(snap.size);
+    });
+
+    // Count credit bills (unpaid invoices)
+    const creditQuery = query(
+      collection(db, "invoices"),
+      where("ownerId", "==", ownerId),
+      where("branchId", "==", branchId),
+      where("paymentStatus", "==", "credit"),
+      where("balance", ">", 0)
+    );
+
+    const unsubscribeCredit = onSnapshot(creditQuery, (snap) => {
+      setCreditCount(snap.size);
+    });
+
+    return () => {
+      unsubscribeInvoices();
+      unsubscribeCredit();
+    };
+  }, [activeBranch?.id, currentUser?.uid]);
+
   /* ---------------- SAVE ACTIVE BRANCH ---------------- */
   useEffect(() => {
     if (activeBranch) {
@@ -403,7 +443,7 @@ export default function OwnerDashboard() {
       .toUpperCase()
       .slice(0, 2), []);
 
-  // Memoized branch list - PERFECT RESPONSIVE
+  // Memoized branch list
   const branchElements = useMemo(() => {
     return branches.map((branch) => {
       const branchWithCurrency = {
@@ -442,7 +482,8 @@ export default function OwnerDashboard() {
       );
     });
   }, [branches, activeBranch?.id, currency.code, currency.symbol, setActiveBranch]);  
-// Memoized stats cards - PERFECT RESPONSIVE
+  
+  // Memoized stats cards
   const statsCards = useMemo(() => {
     if (activeBranch && !loadingStats) {
       return (
@@ -506,7 +547,7 @@ export default function OwnerDashboard() {
     );
   }, [activeBranch, loadingStats, stats, currency.symbol]);
 
-  // Memoized menu cards - PERFECT RESPONSIVE
+  // Memoized menu cards
   const menuCards = useMemo(() => {
     const cards = [
       { href: "/products", icon: "📦", title: "Products", subtitle: "Manage inventory" },
@@ -543,146 +584,190 @@ export default function OwnerDashboard() {
   }, []);
 
   return (
-<div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 text-gray-900">
-  
- <header className="bg-gradient-to-b from-gray-900 via-gray-900/95 to-gray-900/90 text-white shadow-2xl border-b border-white/10">
-  <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
-
-    {/* TOP BAR */}
-    <div className="flex items-center justify-between py-4">
-
-      {/* LEFT: LOGO */}
-      <div className="flex items-center gap-3">
-        <Image
-          src="/stockaro-logo.png"
-          alt="Stockaroo"
-          width={40}
-          height={40}
-          className="rounded-xl shadow-lg"
-        />
-        <h1 className="text-lg sm:text-2xl font-bold">Stockaroo</h1>
-      </div>
-
-      {/* RIGHT ACTIONS */}
-      <div className="flex items-center gap-3">
-
-        {/* PROFILE */}
-        <div>
-          <button onClick={() => setShowLogoutMenu(!showLogoutMenu)}>
-            <div className="w-9 h-9 rounded-xl bg-white/10 flex items-center justify-center font-bold">
-              {getInitials(ownerName)}
+    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 text-gray-900">
+      <header className="bg-gradient-to-b from-gray-900 via-gray-900/95 to-gray-900/90 text-white shadow-2xl border-b border-white/10">
+        <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
+          {/* TOP BAR */}
+          <div className="flex items-center justify-between py-4">
+            {/* LEFT: LOGO */}
+            <div className="flex items-center gap-3">
+              <Image
+                src="/stockaro-logo.png"
+                alt="Stockaroo"
+                width={40}
+                height={40}
+                className="rounded-xl shadow-lg"
+              />
+              <h1 className="text-lg sm:text-2xl font-bold">Stockaroo</h1>
             </div>
-          </button>
-        </div>
 
-        {/* CURRENCY */}
-        <div>
-          <button
-            onClick={() => setShowCurrencyMenu(!showCurrencyMenu)}
-            className="flex items-center gap-2 bg-white/10 px-3 py-2 rounded-xl"
-          >
-            <span>{currency.flag}</span>
-            <span>{currency.symbol}</span>
-          </button>
-        </div>
+            {/* RIGHT ACTIONS */}
+            <div className="flex items-center gap-3">
+              {/* PROFILE */}
+              <div>
+                <button onClick={() => setShowLogoutMenu(!showLogoutMenu)}>
+                  <div className="w-9 h-9 rounded-xl bg-white/10 flex items-center justify-center font-bold">
+                    {getInitials(ownerName)}
+                  </div>
+                </button>
+              </div>
 
-      </div>
-    </div>
+              {/* CURRENCY */}
+              <div>
+                <button
+                  onClick={() => setShowCurrencyMenu(!showCurrencyMenu)}
+                  className="flex items-center gap-2 bg-white/10 px-3 py-2 rounded-xl"
+                >
+                  <span>{currency.flag}</span>
+                  <span>{currency.symbol}</span>
+                </button>
+              </div>
+            </div>
+          </div>
 
-    {/* BRANCH SCROLL (FIXED) */}
-    {branches.length > 0 && (
-      <div className="pb-4 overflow-x-auto">
-        <div className="flex gap-3 py-2 min-w-max">
-          {branchElements}
-        </div>
-      </div>
-    )}
+          {/* BRANCH SCROLL */}
+          {branches.length > 0 && (
+            <div className="pb-4 overflow-x-auto">
+              <div className="flex gap-3 py-2 min-w-max">
+                {branchElements}
+              </div>
+            </div>
+          )}
 
-    {/* STATS */}
-    <div className="pb-6">
-      {statsCards}
-    </div>
-
-  </div>
-
-  {/* ================= DROPDOWNS (OUTSIDE HEADER FLOW) ================= */}
-
-  {/* LOGOUT DROPDOWN */}
-  {showLogoutMenu && (
-    <>
-      <div
-        className="fixed inset-0 z-[9998] bg-black/20"
-        onClick={() => setShowLogoutMenu(false)}
-      />
-      <div className="fixed top-16 right-4 sm:right-6 z-[9999] w-[90vw] max-w-xs bg-white text-black rounded-2xl shadow-2xl border overflow-hidden">
-        <div className="p-4 border-b">
-          <p className="text-xs text-gray-500">Signed in as</p>
-          <p className="font-semibold truncate">{ownerName}</p>
-          <p className="text-xs text-gray-500 truncate">{currentUser?.email}</p>
-        </div>
-
-        <button
-          onClick={handleLogout}
-          className="w-full text-left px-4 py-3 text-red-600 hover:bg-red-50"
-        >
-          Sign Out
-        </button>
-      </div>
-    </>
-  )}
-
-  {/* CURRENCY DROPDOWN */}
-  {showCurrencyMenu && (
-    <>
-      <div
-        className="fixed inset-0 z-[9998] bg-black/20"
-        onClick={() => setShowCurrencyMenu(false)}
-      />
-      <div className="fixed top-16 right-4 sm:right-6 z-[9999] w-[90vw] max-w-sm bg-white text-black rounded-2xl shadow-2xl border">
-        <div className="p-4 max-h-[70vh] overflow-y-auto">
-          <h3 className="text-sm font-bold mb-3 text-center">
-            🌍 Select Currency
-          </h3>
-
-          <div className="space-y-2">
-            {currencies.map((cur) => (
-              <button
-                key={cur.code}
-                onClick={() => updateUserCurrency(cur)}
-                className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-gray-100"
-              >
-                <span>{cur.flag}</span>
-                <div className="flex-1 text-left">
-                  <div className="font-semibold">{cur.name}</div>
-                  <div className="text-xs text-gray-500">{cur.code}</div>
-                </div>
-                <span className="font-bold">{cur.symbol}</span>
-              </button>
-            ))}
+          {/* STATS */}
+          <div className="pb-6">
+            {statsCards}
           </div>
         </div>
-      </div>
-    </>
-  )}
 
-</header>
-   
+        {/* DROPDOWNS */}
+        {showLogoutMenu && (
+          <>
+            <div
+              className="fixed inset-0 z-[9998] bg-black/20"
+              onClick={() => setShowLogoutMenu(false)}
+            />
+            <div className="fixed top-16 right-4 sm:right-6 z-[9999] w-[90vw] max-w-xs bg-white text-black rounded-2xl shadow-2xl border overflow-hidden">
+              <div className="p-4 border-b">
+                <p className="text-xs text-gray-500">Signed in as</p>
+                <p className="font-semibold truncate">{ownerName}</p>
+                <p className="text-xs text-gray-500 truncate">{currentUser?.email}</p>
+              </div>
+              <button
+                onClick={handleLogout}
+                className="w-full text-left px-4 py-3 text-red-600 hover:bg-red-50"
+              >
+                Sign Out
+              </button>
+            </div>
+          </>
+        )}
+
+        {showCurrencyMenu && (
+          <>
+            <div
+              className="fixed inset-0 z-[9998] bg-black/20"
+              onClick={() => setShowCurrencyMenu(false)}
+            />
+            <div className="fixed top-16 right-4 sm:right-6 z-[9999] w-[90vw] max-w-sm bg-white text-black rounded-2xl shadow-2xl border">
+              <div className="p-4 max-h-[70vh] overflow-y-auto">
+                <h3 className="text-sm font-bold mb-3 text-center">
+                  🌍 Select Currency
+                </h3>
+                <div className="space-y-2">
+                  {currencies.map((cur) => (
+                    <button
+                      key={cur.code}
+                      onClick={() => updateUserCurrency(cur)}
+                      className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-gray-100"
+                    >
+                      <span>{cur.flag}</span>
+                      <div className="flex-1 text-left">
+                        <div className="font-semibold">{cur.name}</div>
+                        <div className="text-xs text-gray-500">{cur.code}</div>
+                      </div>
+                      <span className="font-bold">{cur.symbol}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+      </header>
       
-      {/* MAIN CONTENT - PERFECT GRID */}
+      {/* MAIN CONTENT */}
       <main className="w-full flex-grow pb-8 xs:pb-12 sm:pb-16">
         <div className="w-full px-2 xs:px-3 sm:px-4 md:px-6 lg:px-8 max-w-7xl mx-auto pt-2 xs:pt-4 sm:pt-6">
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 xl:grid-cols-6 gap-2 xs:gap-3 sm:gap-4 md:gap-5 auto-rows-fr">
-            {menuCards}
+          
+          {/* Quick Action Cards */}
+          <div className="mb-8">
+            <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+              <span>⚡</span> Quick Actions
+            </h2>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-2 xs:gap-3 sm:gap-4 md:gap-5 auto-rows-fr">
+              {menuCards}
+            </div>
+          </div>
+
+          {/* Invoices and Credit Bills Blocks */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-8">
+            {/* Invoices Block */}
+            <Link href="/wholesale-sales">
+              <div className="group bg-gradient-to-br from-blue-500 to-blue-700 rounded-2xl shadow-xl overflow-hidden cursor-pointer transform transition-all duration-300 hover:scale-105 hover:shadow-2xl">
+                <div className="p-6 md:p-8">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="bg-white/20 backdrop-blur-sm rounded-full p-3">
+                      <span className="text-3xl">📄</span>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-white/80 text-sm">Total Invoices</p>
+                      <p className="text-white text-4xl font-bold">{invoiceCount}</p>
+                    </div>
+                  </div>
+                  <h3 className="text-white text-2xl font-bold mb-2">Invoices</h3>
+                  <p className="text-blue-100 text-sm mb-4">View and manage all invoices</p>
+                  <div className="flex items-center text-white/80 group-hover:text-white transition">
+                    <span className="text-sm">View Details</span>
+                    <span className="ml-2 group-hover:translate-x-2 transition">→</span>
+                  </div>
+                </div>
+                <div className="h-1 bg-white/30 w-full transform origin-left scale-x-0 group-hover:scale-x-100 transition duration-300"></div>
+              </div>
+            </Link>
+
+            {/* Credit Bills Block */}
+            <Link href="/credit-list">
+              <div className="group bg-gradient-to-br from-orange-500 to-red-600 rounded-2xl shadow-xl overflow-hidden cursor-pointer transform transition-all duration-300 hover:scale-105 hover:shadow-2xl">
+                <div className="p-6 md:p-8">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="bg-white/20 backdrop-blur-sm rounded-full p-3">
+                      <span className="text-3xl">⚠️</span>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-white/80 text-sm">Pending Credit Bills</p>
+                      <p className="text-white text-4xl font-bold">{creditCount}</p>
+                    </div>
+                  </div>
+                  <h3 className="text-white text-2xl font-bold mb-2">Credit Bills</h3>
+                  <p className="text-orange-100 text-sm mb-4">Track and manage credit payments</p>
+                  <div className="flex items-center text-white/80 group-hover:text-white transition">
+                    <span className="text-sm">View Details</span>
+                    <span className="ml-2 group-hover:translate-x-2 transition">→</span>
+                  </div>
+                </div>
+                <div className="h-1 bg-white/30 w-full transform origin-left scale-x-0 group-hover:scale-x-100 transition duration-300"></div>
+              </div>
+            </Link>
           </div>
         </div>
       </main>
 
-      {/* FOOTER - PERFECT RESPONSIVE - FIXED CURRENCY ISSUE */}
+      {/* FOOTER */}
       <footer className="bg-gradient-to-t from-gray-900/95 via-gray-900/90 to-gray-900/80 text-white/95 border-t border-white/10 backdrop-blur-2xl shadow-2xl">
         <div className="w-full px-2 xs:px-3 sm:px-4 md:px-6 lg:px-8 max-w-7xl mx-auto py-4 xs:py-6 sm:py-8">
           <div className="flex flex-col sm:flex-row items-center justify-between gap-3 xs:gap-4 sm:gap-6">
-            
-            {/* Logo & Branding - RESPONSIVE */}
+            {/* Logo & Branding */}
             <div className="flex items-center gap-2 xs:gap-3 sm:gap-4 text-center sm:text-left order-2 sm:order-1 flex-shrink-0">
               <div className="relative flex-shrink-0">
                 <Image
@@ -690,7 +775,7 @@ export default function OwnerDashboard() {
                   alt="Stockaroo"
                   width={32}
                   height={32}
-                  className="w-8 h-8 xs:w-9 xs:h-9 sm:w-10 sm:h-10 md:w-12 md:h-12 lg:w-14 lg:h-14 object-contain shadow-2xl rounded-xl sm:rounded-2xl transition-all duration-400"
+                  className="w-8 h-8 xs:w-9 xs:h-9 sm:w-10 sm:h-10 md:w-12 md:h-12 lg:w-14 lg:h-14 object-contain shadow-2xl rounded-xl sm:rounded-2xl"
                   priority
                 />
               </div>
@@ -704,10 +789,8 @@ export default function OwnerDashboard() {
               </div>
             </div>
 
-            {/* Active Branch & Currency - FIXED & RESPONSIVE */}
+            {/* Active Branch & Currency */}
             <div className="flex flex-col xs:flex-row items-center gap-2 xs:gap-3 w-full sm:w-auto justify-center sm:justify-start order-1 sm:order-2 bg-white/5 backdrop-blur-xl border border-white/20 rounded-xl sm:rounded-2xl px-3 xs:px-4 sm:px-5 md:px-6 py-3 xs:py-4 shadow-xl">
-              
-              {/* Currency - ALWAYS SHOWS CORRECT */}
               <div className="flex items-center gap-1 xs:gap-1.5 p-1.5 xs:p-2 bg-white/10 rounded-lg xs:rounded-xl border border-white/20 min-w-[44px] xs:min-w-[50px] sm:min-w-[60px] justify-center flex-shrink-0">
                 <span className="text-lg xs:text-xl sm:text-2xl md:text-3xl flex-shrink-0">{currency.flag}</span>
                 <span className="text-base xs:text-lg sm:text-xl md:text-2xl font-black bg-gradient-to-r from-white to-gray-200 bg-clip-text text-transparent flex-shrink-0">
@@ -715,7 +798,6 @@ export default function OwnerDashboard() {
                 </span>
               </div>
 
-              {/* Branch Name - RESPONSIVE */}
               <div className="flex flex-col items-center xs:items-start min-w-0 flex-1 max-w-[200px] xs:max-w-[250px] sm:max-w-none">
                 <span className="text-[9px] xs:text-[10px] sm:text-xs uppercase tracking-wider text-gray-400 font-semibold bg-white/10 px-1.5 xs:px-2 py-0.5 rounded-full border border-white/20 flex-shrink-0">
                   Active Branch
@@ -725,7 +807,6 @@ export default function OwnerDashboard() {
                 </span>
               </div>
 
-              {/* Status Indicator - RESPONSIVE */}
               {!isOffline ? (
                 <div className="flex items-center gap-1 xs:gap-1.5 p-1.5 xs:p-2 bg-white/10 rounded-lg xs:rounded-xl border border-white/20 flex-shrink-0">
                   <div className="w-2 h-2 xs:w-2.5 xs:h-2.5 md:w-3 md:h-3 bg-emerald-400 rounded-full shadow-lg flex-shrink-0"></div>
@@ -742,9 +823,8 @@ export default function OwnerDashboard() {
         </div>
       </footer>
 
-      {/* Global Styles - PERFECT RESPONSIVE */}
+      {/* Global Styles */}
       <style jsx global>{`
-        /* Custom Scrollbar - RESPONSIVE */
         .scrollbar-thin::-webkit-scrollbar {
           height: 3px;
           width: 3px;
@@ -756,13 +836,7 @@ export default function OwnerDashboard() {
         .scrollbar-thin::-webkit-scrollbar-thumb {
           background: rgba(255, 255, 255, 0.3);
           border-radius: 10px;
-          transition: background-color 0.3s;
         }
-        .scrollbar-thin::-webkit-scrollbar-thumb:hover {
-          background: rgba(255, 255, 255, 0.5);
-        }
-        
-        /* Line Clamp - RESPONSIVE */
         .line-clamp-1, .line-clamp-2 {
           display: -webkit-box;
           -webkit-box-orient: vertical;
@@ -770,13 +844,9 @@ export default function OwnerDashboard() {
         }
         .line-clamp-1 { -webkit-line-clamp: 1; }
         .line-clamp-2 { -webkit-line-clamp: 2; }
-        
-        /* Smooth scroll */
         html {
           scroll-behavior: smooth;
         }
-        
-        /* Animation */
         @keyframes slide-in-from-top {
           from {
             opacity: 0;
@@ -790,18 +860,10 @@ export default function OwnerDashboard() {
         .animate-in.slide-in-from-top-2 {
           animation: slide-in-from-top 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         }
-
-        /* Prevent text overflow */
         .truncate {
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
-        }
-
-        /* Extra small breakpoint for very small screens */
-        @media (max-width: 360px) {
-          .xs\\:min-w-\\$44px\\$ { min-width: 44px !important; }
-          .xs\\:min-w-\\$50px\\$ { min-width: 50px !important; }
         }
       `}</style>
     </div>
