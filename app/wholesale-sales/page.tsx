@@ -310,8 +310,7 @@ export default function WholesaleSales() {
             if (result) {
               const barcode = result.getText();
               handleBarcodeScan(barcode);
-              codeReader.reset();
-              setIsCameraActive(false);
+              // Don't close camera immediately, allow multiple scans
             }
             if (err && !(err instanceof NotFoundException)) {
               console.error('Scanner error:', err);
@@ -334,7 +333,7 @@ export default function WholesaleSales() {
     };
   }, [isCameraActive]);
 
-  // Handle barcode scan result
+  // Handle barcode scan result - AUTO ADD TO CART WITH QTY 1
   const handleBarcodeScan = useCallback((barcode: string) => {
     if (isProcessingScan.current) return;
     isProcessingScan.current = true;
@@ -342,29 +341,43 @@ export default function WholesaleSales() {
     const product = products.find(p => p.barcode === barcode);
     
     if (product) {
-      setSelectedProduct(product);
-      setSearchTerm(product.name);
-      setQty("1");
-      showToast('success', 'Scanned', `${product.name} selected`);
-    } else {
-      // Try name search as fallback
-      const nameMatch = products.find(p => 
-        p.name.toLowerCase().includes(barcode.toLowerCase())
-      );
-      if (nameMatch) {
-        setSelectedProduct(nameMatch);
-        setSearchTerm(nameMatch.name);
-        setQty("1");
-        showToast('success', 'Found', `${nameMatch.name} selected`);
-      } else {
-        showToast('error', 'Not Found', `Product with barcode ${barcode} not found`);
+      // Check stock
+      if (product.qty <= 0) {
+        showToast('error', 'Out of Stock', `${product.name} is out of stock`);
+        isProcessingScan.current = false;
+        return;
       }
+      
+      // Auto add to cart with quantity 1
+      setCart((prev) => {
+        const existing = prev.find((c) => c.id === product.id);
+        if (existing) {
+          const newQty = existing.qty + 1;
+          if (newQty > product.qty) {
+            showToast('warning', 'Stock Limit', `Cannot exceed stock: ${product.qty}`);
+            return prev;
+          }
+          showToast('success', 'Added', `${product.name} x${existing.qty + 1}`);
+          return prev.map((c) =>
+            c.id === product.id ? { ...c, qty: newQty } : c
+          );
+        }
+        showToast('success', 'Added', `${product.name} x1`);
+        return [...prev, { 
+          id: product.id, 
+          name: product.name, 
+          qty: 1, 
+          price: product.saleRate,
+        }];
+      });
+    } else {
+      showToast('error', 'Not Found', `Product with barcode ${barcode} not found`);
     }
 
-    // Reset processing after delay
+    // Reset processing after delay to allow multiple scans
     scanTimeoutRef.current = setTimeout(() => {
       isProcessingScan.current = false;
-    }, 1000);
+    }, 500);
   }, [products]);
 
   // Get next invoice number
@@ -435,7 +448,7 @@ export default function WholesaleSales() {
         if (discount.type === 'percentage') {
           totalDiscount += (item.price * item.qty) * (discount.amount / 100);
         } else {
-          totalDiscount += discount.amount * item.qty; // Fixed: multiply by quantity for fixed discounts
+          totalDiscount += discount.amount * item.qty;
         }
       }
     });
@@ -544,7 +557,7 @@ export default function WholesaleSales() {
         paymentMethod: isCreditSale ? "credit" : "cash",
         notes: invoiceNotes || "",
         createdAt: serverTimestamp(),
-               createdBy: currentUser?.name || "Unknown",
+        createdBy: currentUser?.name || "Unknown",
         branchId: activeBranch?.id!,
         ownerId: ownerId!,
       };
@@ -576,7 +589,7 @@ export default function WholesaleSales() {
     }
   };
 
-  // Update invoice - FIXED
+  // Update invoice
   const updateInvoice = async () => {
     if (!editingInvoice) return;
     
@@ -719,7 +732,7 @@ export default function WholesaleSales() {
     showToast('success', 'Discount Added', `Discount applied to item`);
   };
 
-  // Start camera scanner - FIXED
+  // Start camera scanner
   const startCameraScan = async () => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       showToast('error', 'Camera Error', 'Camera not supported on this device');
@@ -730,7 +743,7 @@ export default function WholesaleSales() {
     setCameraError("");
   };
 
-  // Print invoice - FIXED discount calculation
+  // Print invoice
   const printInvoice = (invoice: Invoice) => {
     const printWindow = window.open('', '_blank');
     if (!printWindow) return;
@@ -773,7 +786,9 @@ export default function WholesaleSales() {
           </div>
           
           <table>
-            <thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
+            <thead>
+              <tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr>
+            </thead>
             <tbody>
               ${invoice.items.map(item => {
                 let itemTotal = item.price * item.qty;
@@ -923,7 +938,7 @@ export default function WholesaleSales() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Left Column - Products & Cart */}
           <div className="lg:col-span-2 space-y-6">
-            {/* Product Search & Scanner */}
+            {/* Product Search & Scanner - Combined with button inside search field */}
             <div className="bg-white rounded-2xl shadow-lg p-6">
               <h2 className="text-xl font-bold mb-4 flex items-center gap-2">🔍 Search Products</h2>
               
@@ -932,7 +947,7 @@ export default function WholesaleSales() {
                   <input
                     type="text"
                     placeholder="Search by name or scan barcode..."
-                    className={`w-full px-4 py-3 rounded-xl border-2 focus:border-blue-500 outline-none transition-all duration-200 ${
+                    className={`w-full px-4 py-3 pr-12 rounded-xl border-2 focus:border-blue-500 outline-none transition-all duration-200 ${
                       isScanning ? 'border-green-400 bg-green-50' : 'border-gray-300 hover:border-gray-400'
                     }`}
                     value={searchTerm}
@@ -948,6 +963,15 @@ export default function WholesaleSales() {
                     }}
                     autoFocus
                   />
+                  
+                  {/* Camera button inside search field */}
+                  <button
+                    onClick={startCameraScan}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 p-2 bg-purple-100 hover:bg-purple-200 rounded-lg transition-all group"
+                    title="Scan barcode"
+                  >
+                    <span className="text-xl">📷</span>
+                  </button>
                   
                   {debouncedSearch && searchResults.length > 0 && !selectedProduct && (
                     <div className="absolute z-20 w-full mt-2 bg-white rounded-xl shadow-lg border max-h-64 overflow-y-auto">
@@ -986,7 +1010,7 @@ export default function WholesaleSales() {
                         onClick={() => {
                           setSelectedProduct(null);
                           setSearchTerm("");
-                                                }}
+                        }}
                         className="text-gray-400 hover:text-gray-600 text-xl font-bold"
                         title="Clear selection"
                       >
@@ -1009,13 +1033,6 @@ export default function WholesaleSales() {
                         className="flex-1 bg-blue-600 disabled:bg-gray-400 text-white py-2 rounded-lg font-semibold hover:bg-blue-700 disabled:cursor-not-allowed transition-all"
                       >
                         ➕ Add to Cart
-                      </button>
-                      <button
-                        onClick={startCameraScan}
-                        className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-all flex items-center gap-2"
-                        title="Scan barcode"
-                      >
-                        📷 Scan
                       </button>
                     </div>
                   </div>
@@ -1252,9 +1269,6 @@ export default function WholesaleSales() {
         </div>
       </main>
 
-      {/* All modals remain the same as before - Invoice List, Edit Invoice, Discount, Customer, Invoice Success, Camera */}
-      {/* [Include all the modal code from the original - they are unchanged and working correctly] */}
-
       {/* Invoice List Modal */}
       {showInvoiceList && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
@@ -1336,8 +1350,346 @@ export default function WholesaleSales() {
         </div>
       )}
 
-      {/* Rest of the modals (Edit Invoice, Discount, Customer, Success Invoice, Camera) - same as original but with minor styling improvements */}
-      {/* For brevity, they remain unchanged from the working version */}
+      {/* Edit Invoice Modal */}
+      {showEditInvoiceModal && editingInvoice && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl">
+            <div className="bg-gradient-to-r from-green-500 to-green-600 text-white p-6 rounded-t-2xl">
+              <div className="flex justify-between items-center">
+                <h3 className="text-2xl font-bold">✏️ Edit Invoice</h3>
+                <button 
+                  onClick={() => {
+                    setShowEditInvoiceModal(false);
+                    setEditingInvoice(null);
+                    setInvoiceNotes("");
+                  }} 
+                  className="text-3xl hover:scale-110 transition-transform"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+            <div className="p-6 space-y-4">
+              <div>
+                <p className="text-sm text-gray-600 mb-1">Invoice #</p>
+                <p className="font-bold text-lg">{editingInvoice.invoiceNumber}</p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-600 mb-1">Customer</p>
+                <p className="font-semibold">{editingInvoice.customerName}</p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-600 mb-1">Total Amount</p>
+                <p className="text-xl font-bold text-blue-600">{currency.symbol}{Math.round(editingInvoice.total).toLocaleString()}</p>
+              </div>
+              <div>
+                <label className="block text-sm font-semibold mb-2">Notes</label>
+                <textarea
+                  value={invoiceNotes}
+                  onChange={(e) => setInvoiceNotes(e.target.value)}
+                  rows={4}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-500 focus:outline-none focus:ring-1 focus:ring-green-200"
+                  placeholder="Add notes..."
+                />
+              </div>
+              <div className="flex gap-3 pt-4">
+                <button
+                  onClick={() => {
+                    setShowEditInvoiceModal(false);
+                    setEditingInvoice(null);
+                    setInvoiceNotes("");
+                  }}
+                  className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-all"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={updateInvoice}
+                  disabled={isProcessing}
+                  className="flex-1 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-semibold transition-all"
+                >
+                  {isProcessing ? 'Saving...' : 'Save Changes'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Discount Modal */}
+      {showDiscountModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl">
+            <div className="bg-gradient-to-r from-purple-500 to-purple-600 text-white p-6 rounded-t-2xl">
+              <div className="flex justify-between items-center">
+                <h3 className="text-2xl font-bold">💰 Apply Discount</h3>
+                <button 
+                  onClick={() => {
+                    setShowDiscountModal(false);
+                    setDiscountItemId(null);
+                    setDiscountAmount("");
+                  }} 
+                  className="text-3xl hover:scale-110 transition-transform"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-semibold mb-2">Discount Type</label>
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setDiscountType('percentage')}
+                    className={`flex-1 py-2 rounded-lg font-semibold transition-all ${
+                      discountType === 'percentage'
+                        ? 'bg-purple-600 text-white'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    }`}
+                  >
+                    Percentage (%)
+                  </button>
+                  <button
+                    onClick={() => setDiscountType('fixed')}
+                    className={`flex-1 py-2 rounded-lg font-semibold transition-all ${
+                      discountType === 'fixed'
+                        ? 'bg-purple-600 text-white'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    }`}
+                  >
+                    Fixed ({currency.symbol})
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-semibold mb-2">
+                  {discountType === 'percentage' ? 'Discount Percentage (%)' : `Discount Amount (${currency.symbol})`}
+                </label>
+                <input
+                  type="number"
+                  step={discountType === 'percentage' ? '0.01' : '1'}
+                  min="0"
+                  max={discountType === 'percentage' ? '100' : undefined}
+                  value={discountAmount}
+                  onChange={(e) => setDiscountAmount(e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+                  placeholder={discountType === 'percentage' ? 'e.g., 10' : 'e.g., 500'}
+                  autoFocus
+                />
+              </div>
+              <div className="flex gap-3 pt-4">
+                <button
+                  onClick={() => {
+                    setShowDiscountModal(false);
+                    setDiscountItemId(null);
+                    setDiscountAmount("");
+                  }}
+                  className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-all"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    if (discountItemId) {
+                      addItemDiscount(discountItemId);
+                    } else {
+                      // Global discount
+                      const amount = parseFloat(discountAmount);
+                      if (!isNaN(amount) && amount >= 0) {
+                        if (discountType === 'percentage' && amount <= 100) {
+                          setGlobalDiscount(amount);
+                          setGlobalDiscountType('percentage');
+                          setShowDiscountModal(false);
+                          setDiscountAmount("");
+                          showToast('success', 'Discount Applied', `${amount}% discount applied to all items`);
+                        } else if (discountType === 'fixed') {
+                          setGlobalDiscount(amount);
+                          setGlobalDiscountType('fixed');
+                          setShowDiscountModal(false);
+                          setDiscountAmount("");
+                          showToast('success', 'Discount Applied', `${currency.symbol}${amount} discount applied`);
+                        } else {
+                          showToast('error', 'Invalid', 'Please enter a valid discount');
+                        }
+                      } else {
+                        showToast('error', 'Invalid', 'Please enter a valid discount');
+                      }
+                    }
+                  }}
+                  className="flex-1 bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-semibold transition-all"
+                >
+                  Apply Discount
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Customer Selection Modal */}
+      {showCustomerModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full max-h-[90vh] overflow-hidden shadow-2xl">
+            <div className="bg-gradient-to-r from-blue-500 to-blue-600 text-white p-6 sticky top-0 z-10">
+              <div className="flex justify-between items-center">
+                <h3 className="text-2xl font-bold">👤 Select Customer</h3>
+                <button 
+                  onClick={() => {
+                    setShowCustomerModal(false);
+                    setShowCreateCustomer(false);
+                    setCustomerSearchTerm("");
+                  }} 
+                  className="text-3xl hover:scale-110 transition-transform"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+            
+            <div className="p-6 overflow-y-auto max-h-[calc(90vh-120px)]">
+              {!showCreateCustomer ? (
+                <>
+                  <div className="mb-4">
+                    <input
+                      type="text"
+                      placeholder="Search by name or phone..."
+                      value={customerSearchTerm}
+                      onChange={(e) => setCustomerSearchTerm(e.target.value)}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                      autoFocus
+                    />
+                  </div>
+                  
+                  <div className="space-y-2 max-h-96 overflow-y-auto mb-4">
+                    {filteredCustomers.length === 0 ? (
+                      <div className="text-center py-8 text-gray-400">
+                        <p>No customers found</p>
+                      </div>
+                    ) : (
+                      filteredCustomers.map(customer => (
+                        <div
+                          key={customer.id}
+                          onClick={() => {
+                            setSelectedCustomer(customer);
+                            setShowCustomerModal(false);
+                            setCustomerSearchTerm("");
+                          }}
+                          className="p-4 border border-gray-200 rounded-xl hover:bg-blue-50 cursor-pointer transition-all hover:border-blue-300"
+                        >
+                          <p className="font-semibold text-gray-900">{customer.name}</p>
+                          {customer.phone && (
+                            <p className="text-sm text-gray-500 mt-1">{customer.phone}</p>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  
+                  <button
+                    onClick={() => setShowCreateCustomer(true)}
+                    className="w-full py-3 bg-green-600 hover:bg-green-700 text-white rounded-xl font-semibold transition-all"
+                  >
+                    + Create New Customer
+                  </button>
+                </>
+              ) : (
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-semibold mb-2">Name *</label>
+                    <input
+                      type="text"
+                      value={newCustomerName}
+                      onChange={(e) => setNewCustomerName(e.target.value)}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:border-green-500 focus:outline-none focus:ring-2 focus:ring-green-200"
+                      placeholder="Customer name"
+                      autoFocus
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold mb-2">Phone</label>
+                    <input
+                      type="tel"
+                      value={newCustomerPhone}
+                      onChange={(e) => setNewCustomerPhone(e.target.value)}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:border-green-500 focus:outline-none focus:ring-2 focus:ring-green-200"
+                      placeholder="Phone number (optional)"
+                    />
+                  </div>
+                  <div className="flex gap-3 pt-4">
+                    <button
+                      onClick={() => {
+                        setShowCreateCustomer(false);
+                        setNewCustomerName("");
+                        setNewCustomerPhone("");
+                      }}
+                      className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-all"
+                    >
+                      Back
+                    </button>
+                    <button
+                      onClick={createCustomer}
+                      disabled={isProcessing}
+                      className="flex-1 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-semibold transition-all"
+                    >
+                      {isProcessing ? 'Creating...' : 'Create Customer'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Invoice Success Modal */}
+      {showInvoiceModal && createdInvoice && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-hidden shadow-2xl">
+            <div className="bg-gradient-to-r from-green-500 to-green-600 text-white p-6">
+              <div className="flex justify-between items-center">
+                <h3 className="text-2xl font-bold">✅ Invoice Created</h3>
+                <button 
+                  onClick={() => {
+                    setShowInvoiceModal(false);
+                    setCreatedInvoice(null);
+                  }} 
+                  className="text-3xl hover:scale-110 transition-transform"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+            
+            <div className="p-6 overflow-y-auto max-h-[calc(90vh-120px)]">
+              <div className="bg-green-50 border border-green-200 rounded-xl p-4 mb-6 text-center">
+                <p className="text-lg font-semibold text-green-800">Invoice #{createdInvoice.invoiceNumber}</p>
+                <p className="text-sm text-green-700">Total: {currency.symbol}{Math.round(createdInvoice.total).toLocaleString()}</p>
+                {createdInvoice.paymentStatus === 'credit' && (
+                  <p className="text-sm text-orange-700 mt-1">Credit Sale - Balance Due: {currency.symbol}{Math.round(createdInvoice.balance).toLocaleString()}</p>
+                )}
+              </div>
+              
+              <div className="flex gap-3">
+                <button
+                  onClick={() => printInvoice(createdInvoice)}
+                  className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-4 py-3 rounded-xl font-semibold transition-all"
+                >
+                  🖨️ Print Invoice
+                </button>
+                <button
+                  onClick={() => {
+                    setShowInvoiceModal(false);
+                    setCreatedInvoice(null);
+                  }}
+                  className="flex-1 bg-gray-600 hover:bg-gray-700 text-white px-4 py-3 rounded-xl font-semibold transition-all"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Camera Modal */}
       {isCameraActive && (
