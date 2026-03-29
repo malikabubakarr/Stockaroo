@@ -143,9 +143,56 @@ export default function WholesaleSales() {
   
   // Scanner refs
   const scanTimeoutRef = useRef<NodeJS.Timeout>();
-  const codeReaderRef = useRef<BrowserMultiFormatReader>();
+  const codeReaderRef = useRef<BrowserMultiFormatReader | null>(null);
   const scannerContainerRef = useRef<HTMLDivElement>(null);
   const isProcessingScan = useRef(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
+
+  // Play beep sound
+  const playBeep = useCallback((type: 'success' | 'error' = 'success') => {
+    try {
+      // Create audio context
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+      
+      const audioCtx = audioContextRef.current;
+      const oscillator = audioCtx.createOscillator();
+      const gainNode = audioCtx.createGain();
+      
+      oscillator.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+      
+      if (type === 'success') {
+        oscillator.frequency.value = 880; // Higher pitch for success
+        gainNode.gain.value = 0.3;
+        oscillator.start();
+        setTimeout(() => {
+          oscillator.stop();
+          gainNode.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.2);
+        }, 200);
+      } else {
+        oscillator.frequency.value = 440; // Lower pitch for error
+        gainNode.gain.value = 0.3;
+        oscillator.start();
+        setTimeout(() => {
+          oscillator.stop();
+          gainNode.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.3);
+        }, 300);
+      }
+    } catch (error) {
+      // Fallback: use simple beep if available
+      try {
+        const audio = new Audio();
+        audio.src = type === 'success' 
+          ? 'data:audio/wav;base64,U3RlYWQgbm90IHN1cHBvcnRlZA==' 
+          : 'data:audio/wav;base64,U3RlYWQgbm90IHN1cHBvcnRlZA==';
+        audio.play().catch(() => {});
+      } catch (e) {
+        console.log('Audio not supported');
+      }
+    }
+  }, []);
 
   // Show toast
   const showToast = (type: 'success' | 'error' | 'warning' | 'info', title: string, message: string) => {
@@ -287,13 +334,23 @@ export default function WholesaleSales() {
   const closeCamera = useCallback(() => {
     if (codeReaderRef.current) {
       codeReaderRef.current.reset();
+      codeReaderRef.current = null;
     }
     setIsCameraActive(false);
     setCameraError("");
     setIsScanningInProgress(false);
+    // Clean up video element
+    if (scannerContainerRef.current) {
+      const videoElement = scannerContainerRef.current.querySelector('video');
+      if (videoElement) {
+        videoElement.pause();
+        videoElement.srcObject = null;
+        videoElement.remove();
+      }
+    }
   }, []);
 
-  // Initialize barcode scanner
+  // Initialize barcode scanner with better configuration
   useEffect(() => {
     if (!isCameraActive || !scannerContainerRef.current) return;
 
@@ -307,15 +364,40 @@ export default function WholesaleSales() {
         
         if (!scannerContainerRef.current) return;
         
+        // Clear any existing video element
+        const existingVideo = scannerContainerRef.current.querySelector('video');
+        if (existingVideo) {
+          existingVideo.pause();
+          existingVideo.srcObject = null;
+          existingVideo.remove();
+        }
+        
         // Create video element for scanner
-        let videoElement = scannerContainerRef.current.querySelector('video') as HTMLVideoElement;
-        if (!videoElement) {
-          videoElement = document.createElement('video');
-          scannerContainerRef.current.appendChild(videoElement);
+        const videoElement = document.createElement('video');
+        videoElement.setAttribute('autoplay', '');
+        videoElement.setAttribute('playsinline', 'true');
+        videoElement.setAttribute('muted', 'true');
+        videoElement.style.width = '100%';
+        videoElement.style.height = '100%';
+        videoElement.style.objectFit = 'cover';
+        scannerContainerRef.current.appendChild(videoElement);
+        
+        // Try to get better camera quality
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter(device => device.kind === 'videoinput');
+        
+        // Prefer back camera if available
+        let selectedDeviceId = null;
+        for (const device of videoDevices) {
+          if (device.label.toLowerCase().includes('back') || 
+              device.label.toLowerCase().includes('rear')) {
+            selectedDeviceId = device.deviceId;
+            break;
+          }
         }
         
         await codeReader.decodeFromVideoDevice(
-          null,
+          selectedDeviceId,
           videoElement,
           (result, err) => {
             if (result) {
@@ -327,6 +409,9 @@ export default function WholesaleSales() {
             }
           }
         );
+        
+        // Set up continuous scanning without closing
+        setIsScanningInProgress(false);
       } catch (error) {
         setCameraError("Camera access denied or not available");
         console.error("Camera error:", error);
@@ -339,6 +424,7 @@ export default function WholesaleSales() {
     return () => {
       if (codeReaderRef.current) {
         codeReaderRef.current.reset();
+        codeReaderRef.current = null;
       }
     };
   }, [isCameraActive]);
@@ -354,11 +440,15 @@ export default function WholesaleSales() {
     if (product) {
       // Check stock
       if (product.qty <= 0) {
+        playBeep('error');
         showToast('error', 'Out of Stock', `${product.name} is out of stock`);
         isProcessingScan.current = false;
         setIsScanningInProgress(false);
         return;
       }
+      
+      // Play success beep
+      playBeep('success');
       
       // Auto add to cart with quantity 1
       setCart((prev) => {
@@ -383,11 +473,13 @@ export default function WholesaleSales() {
         }];
       });
       
-      // Close camera after successful scan
-      setTimeout(() => {
-        closeCamera();
-      }, 100);
+      // Optional: Close camera after successful scan
+      // Uncomment if you want auto-close
+      // setTimeout(() => {
+      //   closeCamera();
+      // }, 500);
     } else {
+      playBeep('error');
       showToast('error', 'Not Found', `Product with barcode ${barcode} not found`);
       setIsScanningInProgress(false);
       // Keep camera open for next scan attempt
@@ -398,7 +490,7 @@ export default function WholesaleSales() {
       isProcessingScan.current = false;
       setIsScanningInProgress(false);
     }, 500);
-  }, [products, closeCamera]);
+  }, [products, playBeep]);
 
   // Get next invoice number
   const getNextInvoiceNumber = useCallback(async () => {
@@ -752,7 +844,7 @@ export default function WholesaleSales() {
     showToast('success', 'Discount Added', `Discount applied to item`);
   };
 
-  // Start camera scanner
+  // Start camera scanner with touch-friendly interface
   const startCameraScan = async () => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       showToast('error', 'Camera Error', 'Camera not supported on this device');
@@ -762,6 +854,7 @@ export default function WholesaleSales() {
     // Close any existing scanner first
     if (codeReaderRef.current) {
       codeReaderRef.current.reset();
+      codeReaderRef.current = null;
     }
     
     setIsCameraActive(true);
@@ -870,6 +963,7 @@ export default function WholesaleSales() {
       if (scanTimeoutRef.current) clearTimeout(scanTimeoutRef.current);
       if (codeReaderRef.current) {
         codeReaderRef.current.reset();
+        codeReaderRef.current = null;
       }
       isProcessingScan.current = false;
     };
@@ -1721,88 +1815,82 @@ export default function WholesaleSales() {
         </div>
       )}
 
-      {/* Camera Modal */}
+      {/* Camera Modal - Improved for mobile */}
       {isCameraActive && (
-        <div className="fixed inset-0 bg-black/90 backdrop-blur-sm flex items-center justify-center z-[100] p-4">
-          <div className="bg-white rounded-3xl max-w-sm w-full overflow-hidden shadow-2xl">
-            <div className="bg-gradient-to-r from-purple-500 to-purple-600 text-white p-5 text-center relative">
-              <h3 className="text-xl font-bold mb-1">📷 Barcode Scanner</h3>
-              <p className="text-sm opacity-90">Point camera at barcode</p>
-              <button
-                onClick={closeCamera}
-                className="absolute right-4 top-1/2 -translate-y-1/2 text-white hover:text-gray-200 text-2xl"
-              >
-                ✕
-              </button>
+        <div className="fixed inset-0 bg-black z-[100] flex flex-col">
+          {/* Header with close button */}
+          <div className="bg-gradient-to-r from-purple-600 to-purple-700 text-white p-4 flex justify-between items-center shadow-lg">
+            <div>
+              <h3 className="text-lg font-bold">📷 Barcode Scanner</h3>
+              <p className="text-xs opacity-90">Align barcode in the center</p>
             </div>
-            <div className="relative">
-              <div 
-                ref={scannerContainerRef} 
-                className="w-full h-96 bg-black flex items-center justify-center"
-              >
-                {!cameraError ? (
-                  <div className="text-white text-lg">Loading camera...</div>
-                ) : (
-                  <div className="text-red-400 text-center p-4">
-                    <div className="text-4xl mb-2">⚠️</div>
-                    <p className="font-semibold">{cameraError}</p>
-                    <button
-                      onClick={() => {
-                        setCameraError("");
-                        // Retry camera
-                        const retryScanner = async () => {
-                          if (codeReaderRef.current && scannerContainerRef.current) {
-                            try {
-                              let videoElement = scannerContainerRef.current.querySelector('video') as HTMLVideoElement;
-                              if (!videoElement) {
-                                videoElement = document.createElement('video');
-                                scannerContainerRef.current.appendChild(videoElement);
-                              }
-                              await codeReaderRef.current.decodeFromVideoDevice(
-                                null,
-                                videoElement,
-                                (result, err) => {
-                                  if (result) {
-                                    const barcode = result.getText();
-                                    handleBarcodeScan(barcode);
-                                  }
-                                  if (err && !(err instanceof NotFoundException)) {
-                                    console.error('Scanner error:', err);
-                                  }
-                                }
-                              );
-                            } catch (error) {
-                              setCameraError("Failed to access camera");
-                            }
-                          }
-                        };
-                        retryScanner();
-                      }}
-                      className="mt-4 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700"
-                    >
-                      Retry
-                    </button>
+            <button
+              onClick={closeCamera}
+              className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center text-2xl hover:bg-white/30 active:scale-95 transition-all"
+            >
+              ✕
+            </button>
+          </div>
+          
+          {/* Camera view */}
+          <div className="flex-1 relative bg-black">
+            <div 
+              ref={scannerContainerRef} 
+              className="absolute inset-0 w-full h-full"
+            >
+              {!cameraError && (
+                <div className="absolute inset-0 flex items-center justify-center z-10">
+                  <div className="text-white text-sm bg-black/50 px-4 py-2 rounded-full">
+                    Loading camera...
                   </div>
-                )}
-              </div>
-              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <div className="w-64 h-64 border-2 border-green-400 rounded-lg animate-pulse"></div>
-              </div>
-              {/* Scanning guide overlay */}
-              <div className="absolute bottom-4 left-0 right-0 text-center">
-                <p className="text-white text-sm bg-black/50 inline-block px-4 py-2 rounded-full">
-                  Align barcode in the center
-                </p>
+                </div>
+              )}
+            </div>
+            
+            {/* Scanning frame */}
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+              <div className="w-4/5 h-1/3 border-2 border-green-400 rounded-lg shadow-lg">
+                <div className="absolute top-0 left-0 w-8 h-8 border-t-2 border-l-2 border-green-400"></div>
+                <div className="absolute top-0 right-0 w-8 h-8 border-t-2 border-r-2 border-green-400"></div>
+                <div className="absolute bottom-0 left-0 w-8 h-8 border-b-2 border-l-2 border-green-400"></div>
+                <div className="absolute bottom-0 right-0 w-8 h-8 border-b-2 border-r-2 border-green-400"></div>
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="w-full h-0.5 bg-green-400 animate-scan"></div>
+                </div>
               </div>
             </div>
-            <div className="p-5 pt-3 bg-gray-50">
-              <button
-                onClick={closeCamera}
-                className="w-full py-3 bg-gray-600 hover:bg-gray-700 text-white rounded-xl font-semibold transition-all"
-              >
-                Close Camera
-              </button>
-            </div>
+            
+            {/* Error message */}
+            {cameraError && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/90">
+                <div className="text-center p-6">
+                  <div className="text-red-400 text-5xl mb-4">⚠️</div>
+                  <p className="text-red-400 font-semibold mb-4">{cameraError}</p>
+                  <button
+                    onClick={() => {
+                      setCameraError("");
+                      startCameraScan();
+                    }}
+                    className="px-6 py-3 bg-purple-600 text-white rounded-xl font-semibold hover:bg-purple-700"
+                  >
+                    Retry
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+          
+          {/* Bottom controls */}
+          <div className="bg-gray-900 p-4">
+            <button
+              onClick={closeCamera}
+              className="w-full py-4 bg-red-600 hover:bg-red-700 text-white rounded-xl font-semibold text-lg active:scale-95 transition-all"
+            >
+              Close Scanner
+            </button>
+            <p className="text-center text-gray-400 text-xs mt-3">
+              Tap on barcode to focus • Hold steady
+            </p>
           </div>
         </div>
       )}
@@ -1812,8 +1900,15 @@ export default function WholesaleSales() {
           from { transform: translateX(100%); opacity: 0; }
           to { transform: translateX(0); opacity: 1; }
         }
+        @keyframes scan {
+          0% { transform: translateY(-50%); }
+          100% { transform: translateY(50%); }
+        }
         .animate-slide-in {
           animation: slide-in 0.3s ease-out;
+        }
+        .animate-scan {
+          animation: scan 2s ease-in-out infinite;
         }
       `}</style>
     </div>
