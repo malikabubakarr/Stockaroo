@@ -115,6 +115,7 @@ export default function WholesaleSales() {
   const [isScanning, setIsScanning] = useState(false);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState("");
+  const [isScanningInProgress, setIsScanningInProgress] = useState(false);
   
   // Customer state
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -282,6 +283,16 @@ export default function WholesaleSales() {
     return () => unsub();
   }, [ownerId, activeBranch?.id, isLoading]);
 
+  // Close camera function
+  const closeCamera = useCallback(() => {
+    if (codeReaderRef.current) {
+      codeReaderRef.current.reset();
+    }
+    setIsCameraActive(false);
+    setCameraError("");
+    setIsScanningInProgress(false);
+  }, []);
+
   // Initialize barcode scanner
   useEffect(() => {
     if (!isCameraActive || !scannerContainerRef.current) return;
@@ -310,7 +321,6 @@ export default function WholesaleSales() {
             if (result) {
               const barcode = result.getText();
               handleBarcodeScan(barcode);
-              // Don't close camera immediately, allow multiple scans
             }
             if (err && !(err instanceof NotFoundException)) {
               console.error('Scanner error:', err);
@@ -333,10 +343,11 @@ export default function WholesaleSales() {
     };
   }, [isCameraActive]);
 
-  // Handle barcode scan result - AUTO ADD TO CART WITH QTY 1
+  // Handle barcode scan result - AUTO ADD TO CART WITH QTY 1 AND CLOSE CAMERA
   const handleBarcodeScan = useCallback((barcode: string) => {
     if (isProcessingScan.current) return;
     isProcessingScan.current = true;
+    setIsScanningInProgress(true);
 
     const product = products.find(p => p.barcode === barcode);
     
@@ -345,6 +356,7 @@ export default function WholesaleSales() {
       if (product.qty <= 0) {
         showToast('error', 'Out of Stock', `${product.name} is out of stock`);
         isProcessingScan.current = false;
+        setIsScanningInProgress(false);
         return;
       }
       
@@ -370,15 +382,23 @@ export default function WholesaleSales() {
           price: product.saleRate,
         }];
       });
+      
+      // Close camera after successful scan
+      setTimeout(() => {
+        closeCamera();
+      }, 100);
     } else {
       showToast('error', 'Not Found', `Product with barcode ${barcode} not found`);
+      setIsScanningInProgress(false);
+      // Keep camera open for next scan attempt
     }
 
     // Reset processing after delay to allow multiple scans
     scanTimeoutRef.current = setTimeout(() => {
       isProcessingScan.current = false;
+      setIsScanningInProgress(false);
     }, 500);
-  }, [products]);
+  }, [products, closeCamera]);
 
   // Get next invoice number
   const getNextInvoiceNumber = useCallback(async () => {
@@ -739,6 +759,11 @@ export default function WholesaleSales() {
       return;
     }
     
+    // Close any existing scanner first
+    if (codeReaderRef.current) {
+      codeReaderRef.current.reset();
+    }
+    
     setIsCameraActive(true);
     setCameraError("");
   };
@@ -967,10 +992,15 @@ export default function WholesaleSales() {
                   {/* Camera button inside search field */}
                   <button
                     onClick={startCameraScan}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 p-2 bg-purple-100 hover:bg-purple-200 rounded-lg transition-all group"
+                    className={`absolute right-3 top-1/2 -translate-y-1/2 p-2 rounded-lg transition-all group ${
+                      isScanningInProgress 
+                        ? 'bg-green-500 animate-pulse' 
+                        : 'bg-purple-100 hover:bg-purple-200'
+                    }`}
                     title="Scan barcode"
+                    disabled={isScanningInProgress}
                   >
-                    <span className="text-xl">📷</span>
+                    <span className="text-xl">{isScanningInProgress ? '⏳' : '📷'}</span>
                   </button>
                   
                   {debouncedSearch && searchResults.length > 0 && !selectedProduct && (
@@ -1694,15 +1724,21 @@ export default function WholesaleSales() {
       {/* Camera Modal */}
       {isCameraActive && (
         <div className="fixed inset-0 bg-black/90 backdrop-blur-sm flex items-center justify-center z-[100] p-4">
-          <div className="bg-white rounded-3xl max-w-sm w-full max-h-[80vh] overflow-hidden shadow-2xl">
-            <div className="bg-gradient-to-r from-purple-500 to-purple-600 text-white p-5 text-center">
+          <div className="bg-white rounded-3xl max-w-sm w-full overflow-hidden shadow-2xl">
+            <div className="bg-gradient-to-r from-purple-500 to-purple-600 text-white p-5 text-center relative">
               <h3 className="text-xl font-bold mb-1">📷 Barcode Scanner</h3>
               <p className="text-sm opacity-90">Point camera at barcode</p>
+              <button
+                onClick={closeCamera}
+                className="absolute right-4 top-1/2 -translate-y-1/2 text-white hover:text-gray-200 text-2xl"
+              >
+                ✕
+              </button>
             </div>
             <div className="relative">
               <div 
                 ref={scannerContainerRef} 
-                className="w-full h-64 bg-black flex items-center justify-center"
+                className="w-full h-96 bg-black flex items-center justify-center"
               >
                 {!cameraError ? (
                   <div className="text-white text-lg">Loading camera...</div>
@@ -1710,25 +1746,61 @@ export default function WholesaleSales() {
                   <div className="text-red-400 text-center p-4">
                     <div className="text-4xl mb-2">⚠️</div>
                     <p className="font-semibold">{cameraError}</p>
+                    <button
+                      onClick={() => {
+                        setCameraError("");
+                        // Retry camera
+                        const retryScanner = async () => {
+                          if (codeReaderRef.current && scannerContainerRef.current) {
+                            try {
+                              let videoElement = scannerContainerRef.current.querySelector('video') as HTMLVideoElement;
+                              if (!videoElement) {
+                                videoElement = document.createElement('video');
+                                scannerContainerRef.current.appendChild(videoElement);
+                              }
+                              await codeReaderRef.current.decodeFromVideoDevice(
+                                null,
+                                videoElement,
+                                (result, err) => {
+                                  if (result) {
+                                    const barcode = result.getText();
+                                    handleBarcodeScan(barcode);
+                                  }
+                                  if (err && !(err instanceof NotFoundException)) {
+                                    console.error('Scanner error:', err);
+                                  }
+                                }
+                              );
+                            } catch (error) {
+                              setCameraError("Failed to access camera");
+                            }
+                          }
+                        };
+                        retryScanner();
+                      }}
+                      className="mt-4 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700"
+                    >
+                      Retry
+                    </button>
                   </div>
                 )}
               </div>
               <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <div className="w-48 h-48 border-2 border-green-400 border-t-transparent rounded-lg animate-pulse"></div>
+                <div className="w-64 h-64 border-2 border-green-400 rounded-lg animate-pulse"></div>
+              </div>
+              {/* Scanning guide overlay */}
+              <div className="absolute bottom-4 left-0 right-0 text-center">
+                <p className="text-white text-sm bg-black/50 inline-block px-4 py-2 rounded-full">
+                  Align barcode in the center
+                </p>
               </div>
             </div>
-            <div className="p-5 pt-2">
+            <div className="p-5 pt-3 bg-gray-50">
               <button
-                onClick={() => {
-                  if (codeReaderRef.current) {
-                    codeReaderRef.current.reset();
-                  }
-                  setIsCameraActive(false);
-                  setCameraError("");
-                }}
-                className="w-full py-3 bg-gray-200 hover:bg-gray-300 rounded-xl font-semibold transition-all"
+                onClick={closeCamera}
+                className="w-full py-3 bg-gray-600 hover:bg-gray-700 text-white rounded-xl font-semibold transition-all"
               >
-                Cancel
+                Close Camera
               </button>
             </div>
           </div>
