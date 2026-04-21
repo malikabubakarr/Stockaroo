@@ -16,6 +16,8 @@ import {
   limit,
   increment,
   getDoc,
+  getDocs,
+  writeBatch,
 } from "firebase/firestore";
 import { useBranch } from "@/context/BranchContext";
 import Image from "next/image";
@@ -177,6 +179,23 @@ export default function Sales() {
     { symbol: "₫", code: "VND", name: "Vietnamese Dong", flag: "🇻🇳" },
   ];
 
+  // Helper functions for user-centric structure
+  const getProductsCollection = useCallback((userId: string) => {
+    return collection(db, "users", userId, "products");
+  }, []);
+
+  const getProductDoc = useCallback((userId: string, productId: string) => {
+    return doc(db, "users", userId, "products", productId);
+  }, []);
+
+  const getSalesCollection = useCallback((userId: string) => {
+    return collection(db, "users", userId, "sales");
+  }, []);
+
+  const getSaleDoc = useCallback((userId: string, saleId: string) => {
+    return doc(db, "users", userId, "sales", saleId);
+  }, []);
+
   // Debug logs wrapped
   useEffect(() => {
     if (DEBUG) console.log('Return quantities updated:', returnQty);
@@ -196,7 +215,7 @@ export default function Sales() {
     setToast({ type, title, message });
   };
 
-  // ✅ FIX: Debounce search input for product search
+  // Debounce search input for product search
   useEffect(() => {
     const timer = setTimeout(() => {
       setDebouncedSearch(searchTerm);
@@ -246,7 +265,8 @@ export default function Sales() {
               delete saleData.localId;
               saleData.date = serverTimestamp();
               
-              await addDoc(collection(db, "sales"), saleData);
+              const salesRef = getSalesCollection(ownerId);
+              await addDoc(salesRef, saleData);
             } catch (err) {
               if (DEBUG) console.error("Error syncing offline sale:", err);
             }
@@ -263,7 +283,7 @@ export default function Sales() {
     };
 
     syncOfflineSales();
-  }, [isOffline, ownerId, activeBranch?.id]);
+  }, [isOffline, ownerId, activeBranch?.id, getSalesCollection]);
 
   /* ---------------- LOAD USER CURRENCY ---------------- */
   useEffect(() => {
@@ -305,7 +325,7 @@ export default function Sales() {
         if (userDoc.exists()) {
           const data = userDoc.data();
           setOwnerId(uid);
-          setCurrentUser({ name: data.name, role: "owner" });
+          setCurrentUser({ name: data.username || data.name, role: "owner" });
           found = true;
         }
 
@@ -329,7 +349,7 @@ export default function Sales() {
     return () => unsub();
   }, []);
 
-  // Load products with cache for instant load
+  // ✅ UPDATED: Load products from user-centric subcollection
   useEffect(() => {
     if (!activeBranch?.id || !ownerId || isLoading) return;
 
@@ -343,9 +363,9 @@ export default function Sales() {
       }
     }
 
+    const productsRef = getProductsCollection(ownerId);
     const q = query(
-      collection(db, "products"),
-      where("ownerId", "==", ownerId),
+      productsRef,
       where("branchId", "==", activeBranch.id)
     );
 
@@ -370,17 +390,17 @@ export default function Sales() {
     });
 
     return () => unsub();
-  }, [ownerId, activeBranch?.id, isLoading]);
+  }, [ownerId, activeBranch?.id, isLoading, getProductsCollection]);
 
-  // Load sales with LIMIT for better performance
+  // ✅ UPDATED: Load sales from user-centric subcollection
   useEffect(() => {
     if (!activeBranch?.id || !ownerId || isLoading) return;
 
     if (DEBUG) console.log("Loading sales for owner:", ownerId, "branch:", activeBranch.id);
 
+    const salesRef = getSalesCollection(ownerId);
     const q = query(
-      collection(db, "sales"),
-      where("ownerId", "==", ownerId),
+      salesRef,
       where("branchId", "==", activeBranch.id),
       orderBy("date", "desc"),
       limit(20)
@@ -419,9 +439,9 @@ export default function Sales() {
     });
 
     return () => unsub();
-  }, [ownerId, activeBranch?.id, isLoading]);
+  }, [ownerId, activeBranch?.id, isLoading, getSalesCollection]);
 
-  // ✅ FAST BARCODE HANDLER - Auto adds with quantity 1
+  // FAST BARCODE HANDLER - Auto adds with quantity 1
   const handleBarcodeInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     if (isProcessingScan.current) return;
     
@@ -498,7 +518,7 @@ export default function Sales() {
     }, 120);
   }, [products]);
 
-  // ✅ MOBILE CAMERA SCANNER - Auto adds with quantity 1
+  // MOBILE CAMERA SCANNER - Auto adds with quantity 1
   const startCameraScan = useCallback(async () => {
     try {
       if (!scannerContainerRef.current) return;
@@ -613,7 +633,7 @@ export default function Sales() {
     };
   }, []);
 
-  // ✅ FIX: Enhanced search with barcode support - now works with debouncedSearch
+  // Enhanced search with barcode support - now works with debouncedSearch
   const searchResults = useMemo(() => {
     if (!debouncedSearch || debouncedSearch.trim() === "") return [];
     const searchLower = debouncedSearch.toLowerCase();
@@ -627,14 +647,14 @@ export default function Sales() {
       .slice(0, 10);
   }, [products, debouncedSearch]);
 
-  // ✅ FIX: Handle product selection from search results
+  // Handle product selection from search results
   const handleProductSelect = useCallback((product: Product) => {
     setSelectedProduct(product);
     setSearchTerm(product.name);
     setDebouncedSearch(product.name);
   }, []);
 
-  // ✅ FIX: Clear search and selected product
+  // Clear search and selected product
   const clearSearch = useCallback(() => {
     setSearchTerm("");
     setDebouncedSearch("");
@@ -746,7 +766,7 @@ export default function Sales() {
     setCart((prev) => prev.map((c) => (c.id === id ? { ...c, qty: newQty } : c)));
   }, [products, removeFromCart]);
 
-  // Complete Sale with offline support
+  // ✅ UPDATED: Complete Sale with offline support (user-centric)
   const makeSale = useCallback(async () => {
     if (cart.length === 0) {
       showToast('error', 'Empty Cart', 'Please add items to cart first');
@@ -819,8 +839,9 @@ export default function Sales() {
         return;
       }
 
+      // ✅ UPDATED: Update product quantities under user-centric structure
       const updates = cart.map(async (item) => {
-        const productRef = doc(db, "products", item.id);
+        const productRef = getProductDoc(ownerId!, item.id);
         await updateDoc(productRef, { qty: increment(-item.qty) });
       });
 
@@ -846,7 +867,9 @@ export default function Sales() {
         saleData.employeeId = employeeId;
       }
 
-      await addDoc(collection(db, "sales"), saleData);
+      // ✅ UPDATED: Save sale under user-centric subcollection
+      const salesRef = getSalesCollection(ownerId!);
+      await addDoc(salesRef, saleData);
 
       setCart([]);
       setDiscount(0);
@@ -859,9 +882,9 @@ export default function Sales() {
     } finally {
       setIsProcessing(false);
     }
-  }, [cart, totals, isOffline, ownerId, activeBranch?.id, currentUser, employeeId, currency, discountType]);
+  }, [cart, totals, isOffline, ownerId, activeBranch?.id, currentUser, employeeId, currency, discountType, getProductDoc, getSalesCollection]);
 
-  // Return Item
+  // ✅ UPDATED: Return Item with user-centric structure
   const returnItem = useCallback(async (sale: Sale, item: CartItem) => {
     if (DEBUG) console.log("=== RETURN ATTEMPT START ===");
     
@@ -898,8 +921,8 @@ export default function Sales() {
 
     try {
       await runTransaction(db, async (transaction) => {
-        const saleRef = doc(db, "sales", sale.id);
-        const productRef = doc(db, "products", item.id);
+        const saleRef = getSaleDoc(ownerId, sale.id);
+        const productRef = getProductDoc(ownerId, item.id);
         
         const saleSnap = await transaction.get(saleRef);
         if (!saleSnap.exists()) {
@@ -1004,7 +1027,7 @@ export default function Sales() {
     } finally {
       setIsReturnProcessing(false);
     }
-  }, [ownerId, activeBranch?.id, currentUser, employeeId, returnQty]);
+  }, [ownerId, activeBranch?.id, currentUser, employeeId, returnQty, getSaleDoc, getProductDoc]);
 
   const getInitials = (name: string) =>
     name
@@ -1173,7 +1196,7 @@ export default function Sales() {
               </h2>
               
               <div className="space-y-4">
-                {/* ✅ FIX: Product Search Input with working name search */}
+                {/* Product Search Input with working name search */}
                 <div className="relative">
                   <label className="block text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
                     <span>🔍 Search Product by Name or Barcode</span>
@@ -1205,7 +1228,7 @@ export default function Sales() {
                     autoFocus
                   />
                   
-                  {/* ✅ FIX: Search Results Dropdown - Now shows products by name */}
+                  {/* Search Results Dropdown - Now shows products by name */}
                   {debouncedSearch && searchResults.length > 0 && !selectedProduct && (
                     <div className="absolute z-50 w-full mt-2 bg-white rounded-xl shadow-2xl border border-gray-200 max-h-80 overflow-y-auto">
                       {searchResults.map(p => (

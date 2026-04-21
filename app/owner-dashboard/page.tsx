@@ -115,6 +115,7 @@ export default function OwnerDashboard() {
     flag: "🇺🇸"
   });
   const [updatingCurrency, setUpdatingCurrency] = useState(false);
+  const [isAuthInitialized, setIsAuthInitialized] = useState(false);
   
   // Stats for invoice and credit blocks
   const [invoiceCount, setInvoiceCount] = useState(0);
@@ -179,7 +180,9 @@ export default function OwnerDashboard() {
         if (storedBranch) {
           const parsedBranch = JSON.parse(storedBranch);
           const found = parsed.find((b: Branch) => b.id === parsedBranch.id);
-          if (found) setActiveBranch(found);
+          if (found && !activeBranch) {
+            setActiveBranch(found);
+          }
         } else if (parsed.length > 0 && !activeBranch) {
           setActiveBranch(parsed[0]);
         }
@@ -202,10 +205,15 @@ export default function OwnerDashboard() {
       if (!user) {
         setCurrentUser(null);
         router.push("/login");
+        setIsAuthInitialized(true);
         return;
       }
 
-      setCurrentUser(user);
+      // Only set user once to avoid infinite loop
+      if (!currentUser || currentUser.uid !== user.uid) {
+        setCurrentUser(user);
+      }
+      
       const ownerId = user.uid;
 
       try {
@@ -224,22 +232,21 @@ export default function OwnerDashboard() {
           }
         }
 
-        const branchesQuery = query(
-          collection(db, "branches"),
-          where("ownerId", "==", ownerId)
-        );
+        // Load branches from user-centric subcollection
+        const branchesRef = collection(db, "users", ownerId, "branches");
+        const branchesQuery = query(branchesRef, orderBy("branchNumber", "asc"));
 
         const unsubscribeBranches = onSnapshot(branchesQuery, (snap) => {
-          const branchList = snap.docs.map((d) => {
+          const branchList: Branch[] = snap.docs.map((d) => {
             const data = d.data();
             return {
               id: d.id,
               shopName: data.shopName,
               ownerId: data.ownerId,
-              isMain: data.isMain,
-              currency: typeof data.currency === "string" ? data.currency : currency.code,
-              currencySymbol: typeof data.currencySymbol === "string" ? data.currencySymbol : currency.symbol,
-            } as Branch;
+              isMain: data.isMain || false,
+              currency: data.currency || currency.code,
+              currencySymbol: data.currencySymbol || currency.symbol,
+            };
           });
         
           setBranches(branchList);
@@ -247,29 +254,31 @@ export default function OwnerDashboard() {
         
           const storedBranch = localStorage.getItem("activeBranch");
         
-          if (storedBranch) {
+          if (storedBranch && !activeBranch) {
             const parsed = JSON.parse(storedBranch);
             const found = branchList.find((b) => b.id === parsed.id);
-            if (found) setActiveBranch({
-              ...found,
-              currencySymbol: typeof found.currencySymbol === "string" ? found.currencySymbol : currency.symbol
-            });
+            if (found) {
+              setActiveBranch(found);
+            } else if (branchList.length > 0 && !activeBranch) {
+              setActiveBranch(branchList[0]);
+            }
           } else if (branchList.length > 0 && !activeBranch) {
-            setActiveBranch({
-              ...branchList[0],
-              currencySymbol: typeof branchList[0].currencySymbol === "string" ? branchList[0].currencySymbol : currency.symbol
-            });
+            setActiveBranch(branchList[0]);
           }
+        }, (error) => {
+          if (DEBUG) console.error("Error loading branches:", error);
         });
 
+        setIsAuthInitialized(true);
         return () => unsubscribeBranches();
       } catch (error) {
         if (DEBUG) console.error("Error in auth setup:", error);
+        setIsAuthInitialized(true);
       }
     });
 
     return () => unsubscribeAuth();
-  }, [router, currency.code, currency.symbol]);
+  }, [router, currency.code, currency.symbol]); // Removed activeBranch and setActiveBranch from dependencies
 
   /* ---------------- UPDATE USER CURRENCY PREFERENCE ---------------- */
   const updateUserCurrency = useCallback(async (selectedCurrency: CurrencyOption) => {
@@ -287,7 +296,7 @@ export default function OwnerDashboard() {
       });
       
       branches.forEach((branch) => {
-        const branchRef = doc(db, "branches", branch.id);
+        const branchRef = doc(db, "users", currentUser.uid, "branches", branch.id);
         batch.update(branchRef, {
           currency: selectedCurrency.code,
           currencySymbol: selectedCurrency.symbol
@@ -297,6 +306,16 @@ export default function OwnerDashboard() {
       await batch.commit();
       setCurrency(selectedCurrency);
       
+      if (activeBranch && setActiveBranch) {
+        const updatedBranch = {
+          ...activeBranch,
+          currency: selectedCurrency.code,
+          currencySymbol: selectedCurrency.symbol
+        };
+        setActiveBranch(updatedBranch);
+        localStorage.setItem("activeBranch", JSON.stringify(updatedBranch));
+      }
+      
       if (DEBUG) console.log("Currency updated successfully for all branches");
       
     } catch (error) {
@@ -305,7 +324,7 @@ export default function OwnerDashboard() {
       setUpdatingCurrency(false);
       setShowCurrencyMenu(false);
     }
-  }, [currentUser?.uid, branches]);
+  }, [currentUser?.uid, branches, activeBranch, setActiveBranch]);
 
   /* ---------------- STATS LOAD ---------------- */
   useEffect(() => {
@@ -317,12 +336,12 @@ export default function OwnerDashboard() {
     const ownerId = currentUser.uid;
     const branchId = activeBranch.id;
 
+    // Sales are stored in users/{userId}/sales
     const salesQuery = query(
-      collection(db, "sales"),
-      where("ownerId", "==", ownerId),
+      collection(db, "users", ownerId, "sales"),
       where("branchId", "==", branchId),
       orderBy("date", "desc"),
-      limit(200)
+      limit(500)
     );
 
     const unsubscribe = onSnapshot(salesQuery, (snap) => {
@@ -371,6 +390,9 @@ export default function OwnerDashboard() {
       setStats(statsData);
       localStorage.setItem("stats_cache", JSON.stringify(statsData));
       setLoadingStats(false);
+    }, (error) => {
+      if (DEBUG) console.error("Error loading sales stats:", error);
+      setLoadingStats(false);
     });
 
     return () => unsubscribe();
@@ -383,28 +405,29 @@ export default function OwnerDashboard() {
     const ownerId = currentUser.uid;
     const branchId = activeBranch.id;
 
-    // Count all invoices
+    // Invoices are stored in users/{userId}/invoices
     const invoicesQuery = query(
-      collection(db, "invoices"),
-      where("ownerId", "==", ownerId),
+      collection(db, "users", ownerId, "invoices"),
       where("branchId", "==", branchId)
     );
 
     const unsubscribeInvoices = onSnapshot(invoicesQuery, (snap) => {
       setInvoiceCount(snap.size);
+    }, (error) => {
+      if (DEBUG) console.error("Error loading invoices:", error);
     });
 
-    // Count credit bills (unpaid invoices)
+    // Count credit bills (unpaid/partial invoices)
     const creditQuery = query(
-      collection(db, "invoices"),
-      where("ownerId", "==", ownerId),
+      collection(db, "users", ownerId, "invoices"),
       where("branchId", "==", branchId),
-      where("paymentStatus", "==", "credit"),
-      where("balance", ">", 0)
+      where("paymentStatus", "in", ["unpaid", "partial"])
     );
 
     const unsubscribeCredit = onSnapshot(creditQuery, (snap) => {
       setCreditCount(snap.size);
+    }, (error) => {
+      if (DEBUG) console.error("Error loading credit bills:", error);
     });
 
     return () => {
@@ -446,18 +469,12 @@ export default function OwnerDashboard() {
   // Memoized branch list
   const branchElements = useMemo(() => {
     return branches.map((branch) => {
-      const branchWithCurrency = {
-        ...branch,
-        currencySymbol: branch.currencySymbol || currency.symbol,
-        currency: branch.currency || currency.code
-      };
-      
       return (
         <button
           key={branch.id}
           onClick={() => {
-            setActiveBranch(branchWithCurrency);
-            localStorage.setItem("activeBranch", JSON.stringify(branchWithCurrency));
+            setActiveBranch(branch);
+            localStorage.setItem("activeBranch", JSON.stringify(branch));
           }}
           className={`group relative px-2 xs:px-3 sm:px-4 py-1.5 xs:py-2 sm:py-2.5 rounded-lg text-[10px] xs:text-xs sm:text-sm font-bold border-2 shadow-xl transition-all duration-400 flex items-center gap-1 xs:gap-1.5 sm:gap-2 backdrop-blur-xl flex-shrink-0 whitespace-nowrap hover:scale-[1.02] active:scale-[0.98] h-9 xs:h-10 sm:h-11 min-w-[100px] xs:min-w-[110px] sm:min-w-[130px] max-w-[140px] xs:max-w-[160px] sm:max-w-[180px] ${
             activeBranch?.id === branch.id
@@ -556,6 +573,8 @@ export default function OwnerDashboard() {
       { href: "/sales", icon: "💰", title: "Sales", subtitle: "Revenue tracking" },
       { href: "/branches", icon: "🏢", title: "Branches", subtitle: "Multi-location" },
       { href: "/cash-collection", icon: "💵", title: "Cash Collection", subtitle: "Employee cash" },
+      { href: "/wholesale-sales", icon: "📄", title: "Create Invoice", subtitle: "Future delivery" },
+      { href: "/customers", icon: "📋", title: "Customers", subtitle: "Add new customers" },
     ];
 
     return cards.map(({ href, icon, title, subtitle }) => (
@@ -583,6 +602,17 @@ export default function OwnerDashboard() {
     ));
   }, []);
 
+  if (!isAuthInitialized) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-4 border-gray-900 border-t-transparent mx-auto mb-4"></div>
+          <p className="text-gray-600 font-medium">Loading Dashboard...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 text-gray-900">
       <header className="bg-gradient-to-b from-gray-900 via-gray-900/95 to-gray-900/90 text-white shadow-2xl border-b border-white/10">
@@ -597,6 +627,7 @@ export default function OwnerDashboard() {
                 width={40}
                 height={40}
                 className="rounded-xl shadow-lg"
+                priority
               />
               <h1 className="text-lg sm:text-2xl font-bold">Stockaroo</h1>
             </div>
@@ -605,10 +636,11 @@ export default function OwnerDashboard() {
             <div className="flex items-center gap-3">
               {/* PROFILE */}
               <div>
-                <button onClick={() => setShowLogoutMenu(!showLogoutMenu)}>
-                  <div className="w-9 h-9 rounded-xl bg-white/10 flex items-center justify-center font-bold">
-                    {getInitials(ownerName)}
-                  </div>
+                <button 
+                  onClick={() => setShowLogoutMenu(!showLogoutMenu)}
+                  className="w-9 h-9 rounded-xl bg-white/10 flex items-center justify-center font-bold hover:bg-white/20 transition-all"
+                >
+                  {getInitials(ownerName)}
                 </button>
               </div>
 
@@ -616,7 +648,8 @@ export default function OwnerDashboard() {
               <div>
                 <button
                   onClick={() => setShowCurrencyMenu(!showCurrencyMenu)}
-                  className="flex items-center gap-2 bg-white/10 px-3 py-2 rounded-xl"
+                  disabled={updatingCurrency}
+                  className="flex items-center gap-2 bg-white/10 px-3 py-2 rounded-xl hover:bg-white/20 transition-all disabled:opacity-50"
                 >
                   <span>{currency.flag}</span>
                   <span>{currency.symbol}</span>
@@ -627,7 +660,7 @@ export default function OwnerDashboard() {
 
           {/* BRANCH SCROLL */}
           {branches.length > 0 && (
-            <div className="pb-4 overflow-x-auto">
+            <div className="pb-4 overflow-x-auto scrollbar-thin">
               <div className="flex gap-3 py-2 min-w-max">
                 {branchElements}
               </div>
@@ -647,7 +680,7 @@ export default function OwnerDashboard() {
               className="fixed inset-0 z-[9998] bg-black/20"
               onClick={() => setShowLogoutMenu(false)}
             />
-            <div className="fixed top-16 right-4 sm:right-6 z-[9999] w-[90vw] max-w-xs bg-white text-black rounded-2xl shadow-2xl border overflow-hidden">
+            <div className="fixed top-16 right-4 sm:right-6 z-[9999] w-[90vw] max-w-xs bg-white text-black rounded-2xl shadow-2xl border overflow-hidden animate-in slide-in-from-top-2">
               <div className="p-4 border-b">
                 <p className="text-xs text-gray-500">Signed in as</p>
                 <p className="font-semibold truncate">{ownerName}</p>
@@ -655,7 +688,7 @@ export default function OwnerDashboard() {
               </div>
               <button
                 onClick={handleLogout}
-                className="w-full text-left px-4 py-3 text-red-600 hover:bg-red-50"
+                className="w-full text-left px-4 py-3 text-red-600 hover:bg-red-50 transition-colors font-medium"
               >
                 Sign Out
               </button>
@@ -669,7 +702,7 @@ export default function OwnerDashboard() {
               className="fixed inset-0 z-[9998] bg-black/20"
               onClick={() => setShowCurrencyMenu(false)}
             />
-            <div className="fixed top-16 right-4 sm:right-6 z-[9999] w-[90vw] max-w-sm bg-white text-black rounded-2xl shadow-2xl border">
+            <div className="fixed top-16 right-4 sm:right-6 z-[9999] w-[90vw] max-w-sm bg-white text-black rounded-2xl shadow-2xl border animate-in slide-in-from-top-2">
               <div className="p-4 max-h-[70vh] overflow-y-auto">
                 <h3 className="text-sm font-bold mb-3 text-center">
                   🌍 Select Currency
@@ -679,9 +712,10 @@ export default function OwnerDashboard() {
                     <button
                       key={cur.code}
                       onClick={() => updateUserCurrency(cur)}
-                      className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-gray-100"
+                      disabled={updatingCurrency}
+                      className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-gray-100 transition-all disabled:opacity-50"
                     >
-                      <span>{cur.flag}</span>
+                      <span className="text-xl">{cur.flag}</span>
                       <div className="flex-1 text-left">
                         <div className="font-semibold">{cur.name}</div>
                         <div className="text-xs text-gray-500">{cur.code}</div>
@@ -705,7 +739,7 @@ export default function OwnerDashboard() {
             <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
               <span>⚡</span> Quick Actions
             </h2>
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-2 xs:gap-3 sm:gap-4 md:gap-5 auto-rows-fr">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-4 gap-2 xs:gap-3 sm:gap-4 md:gap-5 auto-rows-fr">
               {menuCards}
             </div>
           </div>
@@ -713,7 +747,7 @@ export default function OwnerDashboard() {
           {/* Invoices and Credit Bills Blocks */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-8">
             {/* Invoices Block */}
-            <Link href="/wholesale-sales">
+            <Link href="/invoice-management">
               <div className="group bg-gradient-to-br from-blue-500 to-blue-700 rounded-2xl shadow-xl overflow-hidden cursor-pointer transform transition-all duration-300 hover:scale-105 hover:shadow-2xl">
                 <div className="p-6 md:p-8">
                   <div className="flex items-center justify-between mb-4">
@@ -809,7 +843,7 @@ export default function OwnerDashboard() {
 
               {!isOffline ? (
                 <div className="flex items-center gap-1 xs:gap-1.5 p-1.5 xs:p-2 bg-white/10 rounded-lg xs:rounded-xl border border-white/20 flex-shrink-0">
-                  <div className="w-2 h-2 xs:w-2.5 xs:h-2.5 md:w-3 md:h-3 bg-emerald-400 rounded-full shadow-lg flex-shrink-0"></div>
+                  <div className="w-2 h-2 xs:w-2.5 xs:h-2.5 md:w-3 md:h-3 bg-emerald-400 rounded-full shadow-lg flex-shrink-0 animate-pulse"></div>
                   <span className="text-[10px] xs:text-xs sm:text-sm font-bold text-white/90 hidden xs:inline truncate">Online</span>
                 </div>
               ) : (

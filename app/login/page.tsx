@@ -23,6 +23,30 @@ export default function LoginPage() {
   const router = useRouter();
   const { setActiveBranch } = useBranch();
 
+  // ============================================
+  // HELPER FUNCTIONS FOR USER-BASED STRUCTURE
+  // ============================================
+  
+  // Get branches from user's subcollection
+  const getUserBranches = async (userId: string): Promise<any[]> => {
+    const branchesRef = collection(db, "users", userId, "branches");
+    const branchesSnap = await getDocs(branchesRef);
+    return branchesSnap.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+  };
+
+  // Get a specific branch from user's subcollection
+  const getUserBranch = async (userId: string, branchId: string): Promise<any> => {
+    const branchRef = doc(db, "users", userId, "branches", branchId);
+    const branchSnap = await getDoc(branchRef);
+    if (branchSnap.exists()) {
+      return { id: branchSnap.id, ...branchSnap.data() };
+    }
+    return null;
+  };
+
   // 🔥 Check if user is already logged in (persistent session)
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
@@ -31,7 +55,7 @@ export default function LoginPage() {
         const uid = user.uid;
         
         try {
-          // Check if user is owner
+          // Check if user is owner (users collection)
           const userDocRef = doc(db, "users", uid);
           const userSnap = await getDoc(userDocRef);
           
@@ -39,62 +63,58 @@ export default function LoginPage() {
             const userData = userSnap.data();
             
             if (userData.role === "owner") {
-              // Owner login - redirect to owner dashboard
-              const branchQuery = query(
-                collection(db, "branches"),
-                where("ownerId", "==", uid),
-                where("isMain", "==", true)
-              );
+              // 🔥 UPDATED: Get branches from user's subcollection
+              const branches = await getUserBranches(uid);
+              const mainBranch = branches.find(b => b.isMain === true);
               
-              const branchSnap = await getDocs(branchQuery);
-              
-              if (!branchSnap.empty) {
-                const branchDoc = branchSnap.docs[0];
-                const branchData = branchDoc.data();
-                
-                const mainBranch = {
-                  id: branchDoc.id,
-                  shopName: branchData.shopName,
-                  ownerId: branchData.ownerId,
-                  ...branchData,
-                  currency: branchData.currency ?? "",
-                  currencySymbol: branchData.currencySymbol ?? ""
-                };
-                
-                setActiveBranch(mainBranch);
+              if (mainBranch) {
+                setActiveBranch({
+                  id: mainBranch.id,
+                  shopName: mainBranch.shopName,
+                  ownerId: uid,
+                  ...mainBranch,
+                  currency: mainBranch.currency || "PKR",
+                  currencySymbol: mainBranch.currencySymbol || "₨"
+                });
+                router.push("/owner-dashboard");
+                return;
+              } else if (branches.length > 0) {
+                // If no main branch, use first branch
+                const firstBranch = branches[0];
+                setActiveBranch({
+                  id: firstBranch.id,
+                  shopName: firstBranch.shopName,
+                  ownerId: uid,
+                  ...firstBranch,
+                  currency: firstBranch.currency || "PKR",
+                  currencySymbol: firstBranch.currencySymbol || "₨"
+                });
                 router.push("/owner-dashboard");
                 return;
               }
             }
           }
           
-          // Check if user is employee
-          const empQuery = query(
-            collection(db, "employees"),
-            where("uid", "==", uid)
-          );
-          
-          const empSnap = await getDocs(empQuery);
+          // 🔥 UPDATED: Check if user is employee (employees subcollection under user)
+          const employeesRef = collection(db, "users", uid, "employees");
+          const empSnap = await getDocs(employeesRef);
           
           if (!empSnap.empty) {
             const empDoc = empSnap.docs[0];
             const empData = empDoc.data();
             
-            const branchRef = doc(db, "branches", empData.branchId);
-            const branchSnap = await getDoc(branchRef);
+            // Get branch from user's branches subcollection
+            const branch = await getUserBranch(empData.ownerId, empData.branchId);
             
-            if (branchSnap.exists()) {
-              const branchData = branchSnap.data();
-              
+            if (branch) {
               setActiveBranch({
-                id: empData.branchId,
-                shopName: branchData.shopName,
-                ownerId: branchData.ownerId,
-                ...branchData,
-                currency: "",
-                currencySymbol: ""
+                id: branch.id,
+                shopName: branch.shopName,
+                ownerId: empData.ownerId,
+                ...branch,
+                currency: branch.currency || "PKR",
+                currencySymbol: branch.currencySymbol || "₨"
               });
-              
               router.push("/employee-dashboard");
               return;
             }
@@ -119,14 +139,15 @@ export default function LoginPage() {
     try {
       setLoading(true);
 
-      // 🔥 CRITICAL: Set persistence to LOCAL before signing in
-      // This keeps the user logged in even after closing the browser
+      // Set persistence to LOCAL before signing in
       await setPersistence(auth, browserLocalPersistence);
       
       const userCredential = await signInWithEmailAndPassword(auth, email, password);
       const uid = userCredential.user.uid;
 
-      // ---------- CHECK USERS COLLECTION ----------
+      // ============================================
+      // 🔥 UPDATED: Check USER collection first
+      // ============================================
       const userDocRef = doc(db, "users", uid);
       const userSnap = await getDoc(userDocRef);
 
@@ -135,84 +156,87 @@ export default function LoginPage() {
 
         // OWNER LOGIN
         if (userData.role === "owner") {
-          const branchQuery = query(
-            collection(db, "branches"),
-            where("ownerId", "==", uid),
-            where("isMain", "==", true)
-          );
-
-          const branchSnap = await getDocs(branchQuery);
-
-          if (branchSnap.empty) {
-            alert("No main branch found for this owner");
+          // 🔥 UPDATED: Get branches from user's subcollection
+          const branches = await getUserBranches(uid);
+          
+          if (branches.length === 0) {
+            alert("No branches found for this owner. Please create a branch first.");
             setLoading(false);
             return;
           }
 
-          const branchDoc = branchSnap.docs[0];
-          const branchData = branchDoc.data();
+          // Find main branch or use first branch
+          const mainBranch = branches.find(b => b.isMain === true) || branches[0];
 
-          const mainBranch = {
-            id: branchDoc.id,
-            shopName: branchData.shopName,
-            ownerId: branchData.ownerId,
-            ...branchData,
-            currency: branchData.currency ?? "",
-            currencySymbol: branchData.currencySymbol ?? ""
+          const activeBranchData = {
+            id: mainBranch.id,
+            shopName: mainBranch.shopName,
+            ownerId: uid,
+            ...mainBranch,
+            currency: mainBranch.currency || "PKR",
+            currencySymbol: mainBranch.currencySymbol || "₨"
           };
 
-          setActiveBranch(mainBranch);
+          setActiveBranch(activeBranchData);
           
           // Store login info in localStorage for additional persistence
           localStorage.setItem("lastLoggedIn", new Date().toISOString());
           localStorage.setItem("userRole", "owner");
+          localStorage.setItem("userId", uid);
           
           router.push("/owner-dashboard");
           return;
         }
       }
 
-      // ---------- CHECK EMPLOYEE ----------
-      const empQuery = query(
-        collection(db, "employees"),
-        where("uid", "==", uid)
-      );
-
-      const empSnap = await getDocs(empQuery);
-
-      if (!empSnap.empty) {
-        const empDoc = empSnap.docs[0];
-        const empData = empDoc.data();
-
-        const branchRef = doc(db, "branches", empData.branchId);
-        const branchSnap = await getDoc(branchRef);
-
-        if (!branchSnap.exists()) {
-          alert("Branch not found for employee");
-          setLoading(false);
-          return;
+      // ============================================
+      // 🔥 UPDATED: Check EMPLOYEE under user's subcollection
+      // ============================================
+      // For employee, we need to find which owner this employee belongs to
+      // First, get all users (owners) and check their employees subcollection
+      const usersRef = collection(db, "users");
+      const usersSnap = await getDocs(usersRef);
+      
+      let foundEmployee = false;
+      
+      for (const userDoc of usersSnap.docs) {
+        const ownerId = userDoc.id;
+        const employeesRef = collection(db, "users", ownerId, "employees");
+        const empQuery = query(employeesRef, where("uid", "==", uid));
+        const empSnap = await getDocs(empQuery);
+        
+        if (!empSnap.empty) {
+          const empDoc = empSnap.docs[0];
+          const empData = empDoc.data();
+          
+          // Get branch from owner's branches subcollection
+          const branch = await getUserBranch(ownerId, empData.branchId);
+          
+          if (branch) {
+            setActiveBranch({
+              id: branch.id,
+              shopName: branch.shopName,
+              ownerId: ownerId,
+              ...branch,
+              currency: branch.currency || "PKR",
+              currencySymbol: branch.currencySymbol || "₨"
+            });
+            
+            localStorage.setItem("lastLoggedIn", new Date().toISOString());
+            localStorage.setItem("userRole", "employee");
+            localStorage.setItem("userId", uid);
+            localStorage.setItem("ownerId", ownerId);
+            
+            router.push("/employee-dashboard");
+            foundEmployee = true;
+            return;
+          }
         }
-
-        const branchData = branchSnap.data();
-
-        setActiveBranch({
-          id: empData.branchId,
-          shopName: branchData.shopName,
-          ownerId: branchData.ownerId,
-          ...branchData,
-          currency: "",
-          currencySymbol: ""
-        });
-        
-        // Store login info in localStorage for additional persistence
-        localStorage.setItem("lastLoggedIn", new Date().toISOString());
-        localStorage.setItem("userRole", "employee");
-        
-        router.push("/employee-dashboard");
-        return;
       }
 
-      alert("Account not registered in system");
+      if (!foundEmployee) {
+        alert("Account not registered in system. Please sign up first.");
+      }
 
     } catch (err: any) {
       console.error(err);

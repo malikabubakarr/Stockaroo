@@ -19,13 +19,14 @@ import {
   writeBatch,
   limit,
 } from "firebase/firestore";
-import { useBranch } from "@/context/BranchContext";
+import { onAuthStateChanged } from "firebase/auth";
 import Image from "next/image";
 import Link from "next/link";
 import { BrowserMultiFormatReader, NotFoundException } from '@zxing/library';
+import InvoicePrint from "@/components/InvoicePrint";
 
 // Debug mode
-const DEBUG = false;
+const DEBUG = true;
 
 interface Product {
   id: string;
@@ -33,8 +34,10 @@ interface Product {
   barcode?: string;
   qty: number;
   saleRate: number;
+  purchaseRate: number;
   allowSale: boolean;
-  purchaseRate?: number;
+  branchId: string;
+  ownerId: string;
 }
 
 interface CartItem {
@@ -42,8 +45,9 @@ interface CartItem {
   name: string;
   qty: number;
   price: number;
-  discount?: number;
-  discountType?: 'percentage' | 'fixed';
+  regularPrice: number;
+  purchaseRate: number;
+  isPriceOverridden: boolean;
 }
 
 interface Customer {
@@ -51,9 +55,10 @@ interface Customer {
   name: string;
   phone?: string;
   address?: string;
-  ownerId: string;
-  branchId: string;
+  openingBalance: number;
+  totalPurchases?: number;
   isActive: boolean;
+  createdAt: any;
 }
 
 interface Invoice {
@@ -61,6 +66,8 @@ interface Invoice {
   invoiceNumber: string;
   customerId: string;
   customerName: string;
+  customerPhone?: string;
+  customerAddress?: string;
   items: CartItem[];
   subtotal: number;
   discount: number;
@@ -68,13 +75,14 @@ interface Invoice {
   paid: number;
   balance: number;
   isCredit: boolean;
-  paymentStatus: "paid" | "credit";
+  paymentStatus: "paid" | "credit" | "partial";
   paymentMethod: "cash" | "credit";
   notes?: string;
   createdAt: any;
   createdBy: string;
   branchId: string;
   ownerId: string;
+  totalProfit?: number;
 }
 
 interface ToastMessage {
@@ -84,15 +92,15 @@ interface ToastMessage {
 }
 
 export default function WholesaleSales() {
-  const { activeBranch } = useBranch();
-
   // User state
   const [ownerId, setOwnerId] = useState<string | null>(null);
-  const [employeeId, setEmployeeId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isProcessing, setIsProcessing] = useState(false);
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const [currentUser, setCurrentUser] = useState<{ name: string; role: "owner" | "employee" } | null>(null);
+  const [authUser, setAuthUser] = useState<any>(null);
+  const [activeBranchId, setActiveBranchId] = useState<string | null>(null);
+  const [selectedBranch, setSelectedBranch] = useState<any>(null);
 
   // Product and cart state
   const [products, setProducts] = useState<Product[]>([]);
@@ -102,17 +110,21 @@ export default function WholesaleSales() {
   const [qty, setQty] = useState("1");
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   
-  // Discount state
+  // Price override modal state
+  const [showPriceModal, setShowPriceModal] = useState(false);
+  const [priceOverrideProduct, setPriceOverrideProduct] = useState<Product | null>(null);
+  const [overridePrice, setOverridePrice] = useState("");
+  const [isIncreasingProfit, setIsIncreasingProfit] = useState(true);
+  
+  // Print modal state
+  const [showPrintModal, setShowPrintModal] = useState(false);
+  const [invoiceToPrint, setInvoiceToPrint] = useState<Invoice | null>(null);
+  
+  // Global discount state
   const [globalDiscount, setGlobalDiscount] = useState(0);
   const [globalDiscountType, setGlobalDiscountType] = useState<'percentage' | 'fixed'>('percentage');
-  const [itemDiscount, setItemDiscount] = useState<{ [key: string]: { amount: number; type: 'percentage' | 'fixed' } }>({});
-  const [showDiscountModal, setShowDiscountModal] = useState(false);
-  const [discountItemId, setDiscountItemId] = useState<string | null>(null);
-  const [discountAmount, setDiscountAmount] = useState("");
-  const [discountType, setDiscountType] = useState<'percentage' | 'fixed'>('percentage');
   
   // Scanner state
-  const [isScanning, setIsScanning] = useState(false);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState("");
   const [isScanningInProgress, setIsScanningInProgress] = useState(false);
@@ -124,6 +136,8 @@ export default function WholesaleSales() {
   const [showCreateCustomer, setShowCreateCustomer] = useState(false);
   const [newCustomerName, setNewCustomerName] = useState("");
   const [newCustomerPhone, setNewCustomerPhone] = useState("");
+  const [newCustomerAddress, setNewCustomerAddress] = useState("");
+  const [newCustomerOpeningBalance, setNewCustomerOpeningBalance] = useState("");
   const [customerSearchTerm, setCustomerSearchTerm] = useState("");
   
   // Invoice state
@@ -133,13 +147,12 @@ export default function WholesaleSales() {
   const [isCredit, setIsCredit] = useState(false);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [showInvoiceList, setShowInvoiceList] = useState(false);
-  const [selectedInvoiceForView, setSelectedInvoiceForView] = useState<Invoice | null>(null);
   const [showEditInvoiceModal, setShowEditInvoiceModal] = useState(false);
   const [editingInvoice, setEditingInvoice] = useState<Invoice | null>(null);
   
   // Currency
-  const [currency, setCurrency] = useState({ symbol: "₨", code: "PKR" });
-  const [shopName, setShopName] = useState("");
+  const [currency] = useState({ symbol: "₨", code: "PKR" });
+  const [branches, setBranches] = useState<any[]>([]);
   
   // Scanner refs
   const scanTimeoutRef = useRef<NodeJS.Timeout>();
@@ -148,10 +161,18 @@ export default function WholesaleSales() {
   const isProcessingScan = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
 
+  // Helper functions for user subcollection
+  const getUserCollection = useCallback((userId: string, collectionName: string) => {
+    return collection(db, "users", userId, collectionName);
+  }, []);
+
+  const getUserDoc = useCallback((userId: string, collectionName: string, docId: string) => {
+    return doc(db, "users", userId, collectionName, docId);
+  }, []);
+
   // Play beep sound
   const playBeep = useCallback((type: 'success' | 'error' = 'success') => {
     try {
-      // Create audio context
       if (!audioContextRef.current) {
         audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
       }
@@ -164,7 +185,7 @@ export default function WholesaleSales() {
       gainNode.connect(audioCtx.destination);
       
       if (type === 'success') {
-        oscillator.frequency.value = 880; // Higher pitch for success
+        oscillator.frequency.value = 880;
         gainNode.gain.value = 0.3;
         oscillator.start();
         setTimeout(() => {
@@ -172,7 +193,7 @@ export default function WholesaleSales() {
           gainNode.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.2);
         }, 200);
       } else {
-        oscillator.frequency.value = 440; // Lower pitch for error
+        oscillator.frequency.value = 440;
         gainNode.gain.value = 0.3;
         oscillator.start();
         setTimeout(() => {
@@ -181,24 +202,15 @@ export default function WholesaleSales() {
         }, 300);
       }
     } catch (error) {
-      // Fallback: use simple beep if available
-      try {
-        const audio = new Audio();
-        audio.src = type === 'success' 
-          ? 'data:audio/wav;base64,U3RlYWQgbm90IHN1cHBvcnRlZA==' 
-          : 'data:audio/wav;base64,U3RlYWQgbm90IHN1cHBvcnRlZA==';
-        audio.play().catch(() => {});
-      } catch (e) {
-        console.log('Audio not supported');
-      }
+      console.log('Audio not supported');
     }
   }, []);
 
   // Show toast
-  const showToast = (type: 'success' | 'error' | 'warning' | 'info', title: string, message: string) => {
+  const showToast = useCallback((type: ToastMessage['type'], title: string, message: string) => {
     setToast({ type, title, message });
     setTimeout(() => setToast(null), 3000);
-  };
+  }, []);
 
   // Debounce search
   useEffect(() => {
@@ -206,117 +218,143 @@ export default function WholesaleSales() {
     return () => clearTimeout(timer);
   }, [searchTerm]);
 
-  // Load user
+  // Load authenticated user and branches
   useEffect(() => {
-    const unsub = auth.onAuthStateChanged(async (user) => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (DEBUG) console.log("🔐 Auth state changed:", user?.uid);
+      
       if (!user) {
+        setOwnerId(null);
+        setAuthUser(null);
         setIsLoading(false);
         return;
       }
-
-      const uid = user.uid;
-      let found = false;
-
+      
+      setAuthUser(user);
+      setOwnerId(user.uid);
+      
       try {
-        const userDoc = await getDoc(doc(db, "users", uid));
-        if (userDoc.exists()) {
-          const data = userDoc.data();
-          setOwnerId(uid);
-          setCurrentUser({ name: data.name, role: "owner" });
-          found = true;
+        const branchesRef = getUserCollection(user.uid, "branches");
+        const branchesSnap = await getDocs(branchesRef);
+        const branchesList = branchesSnap.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        setBranches(branchesList);
+        
+        const activeBranchData = branchesList.find((b: any) => b.isActive !== false);
+        if (activeBranchData) {
+          setActiveBranchId(activeBranchData.id);
+          setSelectedBranch(activeBranchData);
         }
-
-        if (!found) {
-          const empDoc = await getDoc(doc(db, "allEmployees", uid));
-          if (empDoc.exists()) {
-            const emp = empDoc.data();
-            setOwnerId(emp.ownerId);
-            setEmployeeId(uid);
-            setCurrentUser({ name: emp.name, role: "employee" });
-            found = true;
-          }
+        
+        const userDoc = await getDoc(doc(db, "users", user.uid));
+        if (userDoc.exists()) {
+          const userData = userDoc.data();
+          setCurrentUser({ name: userData.name || "User", role: "owner" });
         }
       } catch (error) {
-        if (DEBUG) console.error("Error loading user:", error);
+        console.error("Error loading branches:", error);
       }
       
       setIsLoading(false);
     });
 
-    return () => unsub();
-  }, []);
+    return () => unsubscribe();
+  }, [getUserCollection]);
 
-  // Load shop name
+  // Load products from USER's subcollection
   useEffect(() => {
-    if (activeBranch?.id && ownerId) {
-      const fetchShopName = async () => {
-        const branchDoc = await getDoc(doc(db, "branches", activeBranch.id));
-        if (branchDoc.exists()) {
-          setShopName(branchDoc.data().shopName || "Wholesale Trading");
-        }
-      };
-      fetchShopName();
+    if (!ownerId || !activeBranchId) {
+      if (DEBUG) console.log("⏳ Waiting for ownerId or branch...");
+      return;
     }
-  }, [activeBranch?.id, ownerId]);
 
-  // Load products
-  useEffect(() => {
-    if (!activeBranch?.id || !ownerId || isLoading) return;
-
+    if (DEBUG) console.log("📡 Loading products for owner:", ownerId, "branch:", activeBranchId);
+    
+    const productsRef = getUserCollection(ownerId, "products");
     const q = query(
-      collection(db, "products"),
-      where("ownerId", "==", ownerId),
-      where("branchId", "==", activeBranch.id),
-      where("allowSale", "==", true)
+      productsRef,
+      where("branchId", "==", activeBranchId),
+      where("allowSale", "==", true),
+      orderBy("name", "asc")
     );
 
-    const unsub = onSnapshot(q, (snap) => {
-      const list: Product[] = snap.docs.map((d) => ({
-        id: d.id,
-        name: d.data().name,
-        barcode: d.data().barcode || '',
-        qty: d.data().qty,
-        saleRate: d.data().saleRate,
-        allowSale: d.data().allowSale,
-        purchaseRate: d.data().purchaseRate,
-      }));
-      setProducts(list);
-    });
-
-    return () => unsub();
-  }, [ownerId, activeBranch?.id, isLoading]);
-
-  // Load customers
-  useEffect(() => {
-    if (!activeBranch?.id || !ownerId || isLoading) return;
-
-    const q = query(
-      collection(db, "customers"),
-      where("ownerId", "==", ownerId),
-      where("branchId", "==", activeBranch.id),
-      where("isActive", "==", true)
+    const unsub = onSnapshot(q, 
+      (snap) => {
+        if (DEBUG) console.log("📊 Products loaded:", snap.size);
+        const list: Product[] = snap.docs.map((d) => ({
+          id: d.id,
+          name: d.data().name,
+          barcode: d.data().barcode || '',
+          qty: d.data().qty || 0,
+          saleRate: d.data().saleRate || 0,
+          purchaseRate: d.data().purchaseRate || 0,
+          allowSale: d.data().allowSale,
+          branchId: d.data().branchId,
+          ownerId: d.data().ownerId,
+        }));
+        setProducts(list);
+      },
+      (error) => {
+        console.error("❌ Error loading products:", error);
+        showToast('error', 'Error', 'Failed to load products');
+      }
     );
 
-    const unsub = onSnapshot(q, (snap) => {
-      const list: Customer[] = snap.docs.map((d) => ({
-        id: d.id,
-        ...d.data()
-      } as Customer));
-      setCustomers(list);
-    });
+    return () => unsub();
+  }, [ownerId, activeBranchId, getUserCollection, showToast]);
+
+  // Load customers from USER's subcollection
+  useEffect(() => {
+    if (!ownerId) {
+      if (DEBUG) console.log("⏳ Waiting for ownerId for customers...");
+      return;
+    }
+
+    if (DEBUG) console.log("📡 Loading customers for owner:", ownerId);
+    
+    const customersRef = getUserCollection(ownerId, "customers");
+    const q = query(
+      customersRef,
+      where("isActive", "==", true),
+      orderBy("createdAt", "desc")
+    );
+
+    const unsub = onSnapshot(q, 
+      (snap) => {
+        if (DEBUG) console.log("📊 Customers loaded:", snap.size);
+        const list: Customer[] = snap.docs.map((d) => ({
+          id: d.id,
+          name: d.data().name,
+          phone: d.data().phone || "",
+          address: d.data().address || "",
+          openingBalance: d.data().openingBalance || 0,
+          totalPurchases: d.data().totalPurchases || 0,
+          isActive: d.data().isActive,
+          createdAt: d.data().createdAt,
+        }));
+        setCustomers(list);
+      },
+      (error) => {
+        console.error("❌ Error loading customers:", error);
+        showToast('error', 'Error', 'Failed to load customers');
+      }
+    );
 
     return () => unsub();
-  }, [ownerId, activeBranch?.id, isLoading]);
+  }, [ownerId, getUserCollection, showToast]);
 
   // Load invoices for display
   useEffect(() => {
-    if (!activeBranch?.id || !ownerId || isLoading) return;
+    if (!ownerId || !activeBranchId) return;
 
+    const invoicesRef = getUserCollection(ownerId, "invoices");
     const q = query(
-      collection(db, "invoices"),
-      where("ownerId", "==", ownerId),
-      where("branchId", "==", activeBranch.id),
-      orderBy("createdAt", "desc")
+      invoicesRef,
+      where("branchId", "==", activeBranchId),
+      orderBy("createdAt", "desc"),
+      limit(50)
     );
 
     const unsub = onSnapshot(q, (snap) => {
@@ -328,7 +366,7 @@ export default function WholesaleSales() {
     });
 
     return () => unsub();
-  }, [ownerId, activeBranch?.id, isLoading]);
+  }, [ownerId, activeBranchId, getUserCollection]);
 
   // Close camera function
   const closeCamera = useCallback(() => {
@@ -339,7 +377,6 @@ export default function WholesaleSales() {
     setIsCameraActive(false);
     setCameraError("");
     setIsScanningInProgress(false);
-    // Clean up video element
     if (scannerContainerRef.current) {
       const videoElement = scannerContainerRef.current.querySelector('video');
       if (videoElement) {
@@ -350,7 +387,62 @@ export default function WholesaleSales() {
     }
   }, []);
 
-  // Initialize barcode scanner with better configuration
+  // Handle barcode scan result
+  const handleBarcodeScan = useCallback((barcode: string) => {
+    if (isProcessingScan.current) return;
+    isProcessingScan.current = true;
+    setIsScanningInProgress(true);
+
+    const product = products.find(p => p.barcode === barcode);
+    
+    if (product) {
+      if (product.qty <= 0) {
+        playBeep('error');
+        showToast('error', 'Out of Stock', `${product.name} is out of stock`);
+        isProcessingScan.current = false;
+        setIsScanningInProgress(false);
+        return;
+      }
+      
+      playBeep('success');
+      
+      setCart((prev) => {
+        const existing = prev.find((c) => c.id === product.id);
+        if (existing) {
+          const newQty = existing.qty + 1;
+          if (newQty > product.qty) {
+            showToast('warning', 'Stock Limit', `Cannot exceed stock: ${product.qty}`);
+            return prev;
+          }
+          showToast('success', 'Added', `${product.name} x${existing.qty + 1}`);
+          return prev.map((c) =>
+            c.id === product.id ? { ...c, qty: newQty } : c
+          );
+        }
+        showToast('success', 'Added', `${product.name} x1`);
+        return [...prev, { 
+          id: product.id, 
+          name: product.name, 
+          qty: 1, 
+          price: product.saleRate,
+          regularPrice: product.saleRate,
+          purchaseRate: product.purchaseRate,
+          isPriceOverridden: false,
+        }];
+      });
+    } else {
+      playBeep('error');
+      showToast('error', 'Not Found', `Product with barcode ${barcode} not found`);
+      setIsScanningInProgress(false);
+    }
+
+    scanTimeoutRef.current = setTimeout(() => {
+      isProcessingScan.current = false;
+      setIsScanningInProgress(false);
+    }, 500);
+  }, [products, playBeep, showToast]);
+
+  // Initialize barcode scanner
   useEffect(() => {
     if (!isCameraActive || !scannerContainerRef.current) return;
 
@@ -364,7 +456,6 @@ export default function WholesaleSales() {
         
         if (!scannerContainerRef.current) return;
         
-        // Clear any existing video element
         const existingVideo = scannerContainerRef.current.querySelector('video');
         if (existingVideo) {
           existingVideo.pause();
@@ -372,7 +463,6 @@ export default function WholesaleSales() {
           existingVideo.remove();
         }
         
-        // Create video element for scanner
         const videoElement = document.createElement('video');
         videoElement.setAttribute('autoplay', '');
         videoElement.setAttribute('playsinline', 'true');
@@ -382,11 +472,9 @@ export default function WholesaleSales() {
         videoElement.style.objectFit = 'cover';
         scannerContainerRef.current.appendChild(videoElement);
         
-        // Try to get better camera quality
         const devices = await navigator.mediaDevices.enumerateDevices();
         const videoDevices = devices.filter(device => device.kind === 'videoinput');
         
-        // Prefer back camera if available
         let selectedDeviceId = null;
         for (const device of videoDevices) {
           if (device.label.toLowerCase().includes('back') || 
@@ -410,7 +498,6 @@ export default function WholesaleSales() {
           }
         );
         
-        // Set up continuous scanning without closing
         setIsScanningInProgress(false);
       } catch (error) {
         setCameraError("Camera access denied or not available");
@@ -427,81 +514,99 @@ export default function WholesaleSales() {
         codeReaderRef.current = null;
       }
     };
-  }, [isCameraActive]);
+  }, [isCameraActive, handleBarcodeScan]);
 
-  // Handle barcode scan result - AUTO ADD TO CART WITH QTY 1 AND CLOSE CAMERA
-  const handleBarcodeScan = useCallback((barcode: string) => {
-    if (isProcessingScan.current) return;
-    isProcessingScan.current = true;
-    setIsScanningInProgress(true);
-
-    const product = products.find(p => p.barcode === barcode);
+  // Override price for a product (temporary, just for this sale)
+  const overrideProductPrice = async () => {
+    if (!priceOverrideProduct) return;
     
-    if (product) {
-      // Check stock
-      if (product.qty <= 0) {
-        playBeep('error');
-        showToast('error', 'Out of Stock', `${product.name} is out of stock`);
-        isProcessingScan.current = false;
-        setIsScanningInProgress(false);
+    const newPrice = parseFloat(overridePrice);
+    if (isNaN(newPrice) || newPrice <= 0) {
+      showToast('error', 'Invalid Price', 'Please enter a valid price');
+      return;
+    }
+    
+    if (newPrice < priceOverrideProduct.purchaseRate) {
+      showToast('error', 'Invalid Price', `Price cannot be less than purchase price (${currency.symbol}${priceOverrideProduct.purchaseRate})`);
+      return;
+    }
+    
+    const existingItem = cart.find(item => item.id === priceOverrideProduct.id);
+    
+    if (existingItem) {
+      setCart(prev => prev.map(item => 
+        item.id === priceOverrideProduct.id 
+          ? { 
+              ...item, 
+              price: newPrice, 
+              isPriceOverridden: true,
+              regularPrice: item.regularPrice 
+            }
+          : item
+      ));
+      
+      const profitChange = newPrice - existingItem.regularPrice;
+      const profitChangePercent = (profitChange / existingItem.purchaseRate) * 100;
+      
+      if (newPrice > existingItem.regularPrice) {
+        showToast('success', 'Price Increased', `${priceOverrideProduct.name} price increased by ${currency.symbol}${profitChange} (+${profitChangePercent.toFixed(1)}% profit)`);
+      } else if (newPrice < existingItem.regularPrice) {
+        showToast('warning', 'Price Decreased', `${priceOverrideProduct.name} price decreased by ${currency.symbol}${Math.abs(profitChange)} (${profitChangePercent.toFixed(1)}% less profit)`);
+      } else {
+        showToast('info', 'Price Reset', `${priceOverrideProduct.name} price reset to regular rate`);
+      }
+    } else {
+      const quantity = Math.max(1, Number(qty) || 1);
+      
+      if (quantity > priceOverrideProduct.qty) {
+        showToast('error', 'Insufficient Stock', `Only ${priceOverrideProduct.qty} available`);
+        setShowPriceModal(false);
+        setPriceOverrideProduct(null);
+        setOverridePrice("");
         return;
       }
       
-      // Play success beep
-      playBeep('success');
+      setCart(prev => [...prev, { 
+        id: priceOverrideProduct.id, 
+        name: priceOverrideProduct.name, 
+        qty: quantity, 
+        price: newPrice,
+        regularPrice: priceOverrideProduct.saleRate,
+        purchaseRate: priceOverrideProduct.purchaseRate,
+        isPriceOverridden: true,
+      }]);
       
-      // Auto add to cart with quantity 1
-      setCart((prev) => {
-        const existing = prev.find((c) => c.id === product.id);
-        if (existing) {
-          const newQty = existing.qty + 1;
-          if (newQty > product.qty) {
-            showToast('warning', 'Stock Limit', `Cannot exceed stock: ${product.qty}`);
-            return prev;
-          }
-          showToast('success', 'Added', `${product.name} x${existing.qty + 1}`);
-          return prev.map((c) =>
-            c.id === product.id ? { ...c, qty: newQty } : c
-          );
-        }
-        showToast('success', 'Added', `${product.name} x1`);
-        return [...prev, { 
-          id: product.id, 
-          name: product.name, 
-          qty: 1, 
-          price: product.saleRate,
-        }];
-      });
+      const profitChange = newPrice - priceOverrideProduct.saleRate;
+      const profitChangePercent = (profitChange / priceOverrideProduct.purchaseRate) * 100;
       
-      // Optional: Close camera after successful scan
-      // Uncomment if you want auto-close
-      // setTimeout(() => {
-      //   closeCamera();
-      // }, 500);
-    } else {
-      playBeep('error');
-      showToast('error', 'Not Found', `Product with barcode ${barcode} not found`);
-      setIsScanningInProgress(false);
-      // Keep camera open for next scan attempt
+      if (newPrice > priceOverrideProduct.saleRate) {
+        showToast('success', 'Added with Higher Price', `${priceOverrideProduct.name} x${quantity} at ${currency.symbol}${newPrice} (+${profitChangePercent.toFixed(1)}% extra profit)`);
+      } else if (newPrice < priceOverrideProduct.saleRate) {
+        showToast('warning', 'Added with Lower Price', `${priceOverrideProduct.name} x${quantity} at ${currency.symbol}${newPrice} (${profitChangePercent.toFixed(1)}% less profit)`);
+      } else {
+        showToast('success', 'Added', `${priceOverrideProduct.name} x${quantity}`);
+      }
+      
+      setSearchTerm("");
+      setSelectedProduct(null);
+      setQty("1");
     }
-
-    // Reset processing after delay to allow multiple scans
-    scanTimeoutRef.current = setTimeout(() => {
-      isProcessingScan.current = false;
-      setIsScanningInProgress(false);
-    }, 500);
-  }, [products, playBeep]);
+    
+    setShowPriceModal(false);
+    setPriceOverrideProduct(null);
+    setOverridePrice("");
+    setIsIncreasingProfit(true);
+  };
 
   // Get next invoice number
   const getNextInvoiceNumber = useCallback(async () => {
-    if (!activeBranch?.id || !ownerId) return "INV-001";
+    if (!ownerId || !activeBranchId) return "INV-001";
     
     try {
-      const invoicesRef = collection(db, "invoices");
+      const invoicesRef = getUserCollection(ownerId, "invoices");
       const q = query(
         invoicesRef,
-        where("ownerId", "==", ownerId),
-        where("branchId", "==", activeBranch.id),
+        where("branchId", "==", activeBranchId),
         orderBy("createdAt", "desc"),
         limit(1)
       );
@@ -524,7 +629,7 @@ export default function WholesaleSales() {
       console.error("Error getting next invoice number:", error);
       return `INV-${Date.now().toString().slice(-6)}`;
     }
-  }, [ownerId, activeBranch?.id]);
+  }, [ownerId, activeBranchId, getUserCollection]);
 
   // Search products
   const searchResults = useMemo(() => {
@@ -544,71 +649,86 @@ export default function WholesaleSales() {
     const searchLower = customerSearchTerm.toLowerCase();
     return customers.filter(c =>
       c.name.toLowerCase().includes(searchLower) ||
-      (c.phone && c.phone.includes(customerSearchTerm))
+      (c.phone && c.phone.includes(customerSearchTerm)) ||
+      (c.address && c.address.toLowerCase().includes(searchLower))
     );
   }, [customers, customerSearchTerm]);
 
-  // Calculate totals with discounts
+  // Calculate totals
   const totals = useMemo(() => {
     let subtotal = cart.reduce((sum, c) => sum + c.price * c.qty, 0);
     let totalDiscount = 0;
     
-    // Calculate item discounts
-    cart.forEach(item => {
-      const discount = itemDiscount[item.id];
-      if (discount) {
-        if (discount.type === 'percentage') {
-          totalDiscount += (item.price * item.qty) * (discount.amount / 100);
-        } else {
-          totalDiscount += discount.amount * item.qty;
-        }
-      }
-    });
-    
-    // Apply global discount
-    let finalTotal = subtotal - totalDiscount;
+    let finalTotal = subtotal;
     if (globalDiscount > 0) {
       if (globalDiscountType === 'percentage') {
         finalTotal = finalTotal * (1 - globalDiscount / 100);
+        totalDiscount = subtotal - finalTotal;
       } else {
         finalTotal = Math.max(0, finalTotal - globalDiscount);
+        totalDiscount = globalDiscount;
       }
     }
     
     return { 
       subtotal, 
-      discount: totalDiscount + (globalDiscountType === 'percentage' ? (subtotal - totalDiscount) * (globalDiscount / 100) : globalDiscount),
+      discount: totalDiscount,
       total: Math.max(0, finalTotal) 
     };
-  }, [cart, itemDiscount, globalDiscount, globalDiscountType]);
+  }, [cart, globalDiscount, globalDiscountType]);
 
-  // Create customer
+  // Calculate total profit
+  const totalProfit = useMemo(() => {
+    return cart.reduce((sum, item) => {
+      const profit = (item.price - item.purchaseRate) * item.qty;
+      return sum + profit;
+    }, 0);
+  }, [cart]);
+
+  // Create customer with address and opening balance
   const createCustomer = async () => {
     if (!newCustomerName.trim()) {
       showToast('error', 'Required', 'Customer name is required');
       return;
     }
 
+    if (!ownerId) {
+      showToast('error', 'Error', 'User not authenticated');
+      return;
+    }
+
     setIsProcessing(true);
     try {
+      const customersRef = getUserCollection(ownerId, "customers");
+      const openingBalance = parseFloat(newCustomerOpeningBalance) || 0;
+      
       const customerData = {
         name: newCustomerName.trim(),
         phone: newCustomerPhone.trim() || "",
+        address: newCustomerAddress.trim() || "",
+        openingBalance: openingBalance,
+        totalPurchases: 0,
         isActive: true,
         createdAt: serverTimestamp(),
-        ownerId: ownerId!,
-        branchId: activeBranch?.id!,
+        updatedAt: serverTimestamp(),
       };
       
-      const docRef = await addDoc(collection(db, "customers"), customerData);
-      const createdCustomer = { id: docRef.id, ...customerData, ownerId: ownerId!, branchId: activeBranch?.id! } as Customer;
-      setCustomers(prev => [...prev, createdCustomer]);
+      const docRef = await addDoc(customersRef, customerData);
+      const createdCustomer = { id: docRef.id, ...customerData } as Customer;
+      setCustomers(prev => [createdCustomer, ...prev]);
       setSelectedCustomer(createdCustomer);
       setShowCustomerModal(false);
       setShowCreateCustomer(false);
       setNewCustomerName("");
       setNewCustomerPhone("");
-      showToast('success', 'Customer Created', `${newCustomerName} added`);
+      setNewCustomerAddress("");
+      setNewCustomerOpeningBalance("");
+      
+      if (openingBalance !== 0) {
+        showToast('success', 'Customer Created', `${newCustomerName} added with opening balance ${currency.symbol}${openingBalance}`);
+      } else {
+        showToast('success', 'Customer Created', `${newCustomerName} added`);
+      }
     } catch (error) {
       console.error(error);
       showToast('error', 'Error', 'Failed to create customer');
@@ -617,7 +737,52 @@ export default function WholesaleSales() {
     }
   };
 
-  // Create invoice
+  // Edit price of item in cart (temporary override)
+  const editCartItemPrice = (itemId: string, currentPrice: number, regularPrice: number, purchaseRate: number) => {
+    const newPrice = prompt(`Enter new sale price for this item (Min: ${currency.symbol}${purchaseRate}, Regular: ${currency.symbol}${regularPrice}):`, currentPrice.toString());
+    if (newPrice !== null) {
+      const priceNum = parseFloat(newPrice);
+      if (!isNaN(priceNum) && priceNum > 0) {
+        if (priceNum < purchaseRate) {
+          showToast('error', 'Invalid Price', `Price cannot be less than purchase price (${currency.symbol}${purchaseRate})`);
+          return;
+        }
+        
+        setCart(prev => prev.map(item => 
+          item.id === itemId 
+            ? { 
+                ...item, 
+                price: priceNum, 
+                isPriceOverridden: priceNum !== regularPrice 
+              } 
+            : item
+        ));
+        
+        const profitChange = priceNum - regularPrice;
+        if (profitChange > 0) {
+          showToast('success', 'Price Increased', `Item price increased by ${currency.symbol}${profitChange}`);
+        } else if (profitChange < 0) {
+          showToast('warning', 'Price Decreased', `Item price decreased by ${currency.symbol}${Math.abs(profitChange)}`);
+        } else {
+          showToast('info', 'Price Reset', `Item price reset to regular rate`);
+        }
+      } else {
+        showToast('error', 'Invalid', 'Please enter a valid price');
+      }
+    }
+  };
+
+  // Reset item price to regular price
+  const resetCartItemPrice = (itemId: string, regularPrice: number) => {
+    setCart(prev => prev.map(item => 
+      item.id === itemId 
+        ? { ...item, price: regularPrice, isPriceOverridden: false } 
+        : item
+    ));
+    showToast('info', 'Price Reset', `Price reset to regular ${currency.symbol}${regularPrice}`);
+  };
+
+  // Create invoice - ALL INVOICES START AS UNPAID
   const createInvoice = async () => {
     if (!selectedCustomer) {
       showToast('error', 'No Customer', 'Please select a customer');
@@ -629,70 +794,97 @@ export default function WholesaleSales() {
       return;
     }
 
+    if (!ownerId || !activeBranchId) {
+      showToast('error', 'Error', 'Missing branch or user info');
+      return;
+    }
+
     setIsProcessing(true);
 
     try {
       const invoiceNumber = await getNextInvoiceNumber();
       const { subtotal, discount, total } = totals;
       
-      const isCreditSale = isCredit;
-      const paymentAmount = isCreditSale ? 0 : total;
-      const balance = isCreditSale ? total : 0;
+      // All invoices start with ZERO paid - full amount is due
+const paymentAmount = 0;
+const balance = total;
 
-      // Update stock
-      const batch = writeBatch(db);
-      for (const item of cart) {
-        const productRef = doc(db, "products", item.id);
-        batch.update(productRef, { qty: increment(-item.qty) });
-      }
+const batch = writeBatch(db);
 
-      // Create invoice
-      const invoiceData: any = {
-        invoiceNumber,
-        customerId: selectedCustomer.id,
-        customerName: selectedCustomer.name,
-        items: cart.map(item => ({
-          id: item.id,
-          name: item.name,
-          qty: item.qty,
-          price: item.price,
-          discount: itemDiscount[item.id]?.amount || 0,
-          discountType: itemDiscount[item.id]?.type || null
-        })),
-        subtotal,
-        discount,
-        total,
-        paid: paymentAmount,
-        balance,
-        isCredit: isCreditSale,
-        paymentStatus: isCreditSale ? "credit" : "paid",
-        paymentMethod: isCreditSale ? "credit" : "cash",
-        notes: invoiceNotes || "",
-        createdAt: serverTimestamp(),
-        createdBy: currentUser?.name || "Unknown",
-        branchId: activeBranch?.id!,
-        ownerId: ownerId!,
-      };
+for (const item of cart) {
+  const productRef = getUserDoc(ownerId, "products", item.id);
+  batch.update(productRef, { qty: increment(-item.qty) });
+}
 
-      const invoiceRef = doc(collection(db, "invoices"));
-      batch.set(invoiceRef, invoiceData);
-      await batch.commit();
+const invoicesRef = getUserCollection(ownerId, "invoices");
+const invoiceData = {
+  invoiceNumber,
+  customerId: selectedCustomer.id,
+  customerName: selectedCustomer.name,
+  customerPhone: selectedCustomer.phone || "",
+  customerAddress: selectedCustomer.address || "",
+  items: cart.map(item => ({
+    id: item.id,
+    name: item.name,
+    qty: item.qty,
+    price: item.price,
+    regularPrice: item.regularPrice,
+    purchaseRate: item.purchaseRate,
+    isPriceOverridden: item.isPriceOverridden,
+  })),
+  subtotal,
+  discount,
+  total,
+  paid: paymentAmount,
+  balance: balance,
+  totalProfit: totalProfit,
+  isCredit: true,
+  paymentStatus: "credit" as "credit",  // Fixed: Added 'as "credit"'
+  paymentMethod: "credit" as "credit",  // Fixed: Added 'as "credit"'
+  notes: invoiceNotes || "",
+  createdAt: serverTimestamp(),
+  createdBy: currentUser?.name || "Unknown",
+  branchId: activeBranchId,
+  ownerId: ownerId,
+};
+
+const invoiceRef = doc(invoicesRef);
+batch.set(invoiceRef, invoiceData);
+
+// Add ledger entry
+const ledgerRef = getUserCollection(ownerId, "ledger");
+batch.set(doc(ledgerRef), {
+  partyId: selectedCustomer.id,
+  partyName: selectedCustomer.name,
+  type: 'credit_sale',
+  amount: balance,
+  invoiceId: invoiceRef.id,
+  invoiceNumber,
+  branchId: activeBranchId,
+  date: serverTimestamp(),
+  note: `Invoice #${invoiceNumber} created - Total: ${currency.symbol}${total.toLocaleString()}`,
+});
+
+await batch.commit();
+
+const newInvoice: Invoice = { 
+  id: invoiceRef.id, 
+  ...invoiceData, 
+  createdAt: new Date(),
+} as Invoice;  // Fixed: Added 'as Invoice' cast
+setCreatedInvoice(newInvoice);
+setShowInvoiceModal(true);
       
-      const newInvoice: Invoice = { id: invoiceRef.id, ...invoiceData };
-      setCreatedInvoice(newInvoice);
-      setShowInvoiceModal(true);
-      
-      // Reset cart and form
+      // Reset form
       setCart([]);
       setInvoiceNotes("");
       setIsCredit(false);
       setSelectedProduct(null);
       setGlobalDiscount(0);
       setGlobalDiscountType('percentage');
-      setItemDiscount({});
       setSearchTerm("");
       
-      showToast('success', 'Invoice Created', `Invoice #${invoiceNumber}`);
+      showToast('success', 'Invoice Created', `Invoice #${invoiceNumber} | Total: ${currency.symbol}${total.toLocaleString()} | Status: UNPAID | Profit: ${currency.symbol}${totalProfit.toLocaleString()}`);
     } catch (error) {
       console.error("Create invoice error:", error);
       showToast('error', 'Error', 'Failed to create invoice');
@@ -703,22 +895,15 @@ export default function WholesaleSales() {
 
   // Update invoice
   const updateInvoice = async () => {
-    if (!editingInvoice) return;
+    if (!editingInvoice || !ownerId) return;
     
     setIsProcessing(true);
     try {
-      const invoiceRef = doc(db, "invoices", editingInvoice.id);
+      const invoiceRef = getUserDoc(ownerId, "invoices", editingInvoice.id);
       await updateDoc(invoiceRef, {
         notes: invoiceNotes || "",
         updatedAt: serverTimestamp(),
       });
-      
-      // Update local invoices list
-      setInvoices(prev => prev.map(inv => 
-        inv.id === editingInvoice!.id 
-          ? { ...inv, notes: invoiceNotes || "" }
-          : inv
-      ));
       
       showToast('success', 'Invoice Updated', 'Notes updated successfully');
       setShowEditInvoiceModal(false);
@@ -738,10 +923,28 @@ export default function WholesaleSales() {
       return;
     }
     
+    if (!ownerId) return;
+    
     setIsProcessing(true);
     try {
-      const invoiceRef = doc(db, "invoices", invoiceId);
-      await deleteDoc(invoiceRef);
+      const invoiceRef = getUserDoc(ownerId, "invoices", invoiceId);
+      const invoiceDoc = await getDoc(invoiceRef);
+      
+      if (invoiceDoc.exists()) {
+        const invoiceData = invoiceDoc.data();
+        const batch = writeBatch(db);
+        
+        // Restore stock for each item
+        for (const item of invoiceData.items || []) {
+          const productRef = getUserDoc(ownerId, "products", item.id);
+          batch.update(productRef, { qty: increment(item.qty) });
+        }
+        
+        batch.delete(invoiceRef);
+        await batch.commit();
+      } else {
+        await deleteDoc(invoiceRef);
+      }
       
       showToast('success', 'Invoice Deleted', 'Invoice deleted successfully');
     } catch (error) {
@@ -752,7 +955,7 @@ export default function WholesaleSales() {
     }
   };
 
-  // Add to cart
+  // Add to cart with regular price
   const addToCart = useCallback(() => {
     const product = selectedProduct || products.find(p => 
       p.name.toLowerCase() === searchTerm.toLowerCase().trim() ||
@@ -771,40 +974,39 @@ export default function WholesaleSales() {
       return;
     }
 
-    setCart((prev) => {
-      const existing = prev.find((c) => c.id === product.id);
-      if (existing) {
-        const newQty = existing.qty + quantity;
-        if (newQty > product.qty) {
-          showToast('error', 'Stock Limit', `Cannot exceed stock: ${product.qty}`);
-          return prev;
-        }
-        return prev.map((c) =>
-          c.id === product.id ? { ...c, qty: newQty } : c
-        );
+    const existingItem = cart.find(item => item.id === product.id);
+    
+    if (existingItem) {
+      const newQty = existingItem.qty + quantity;
+      if (newQty > product.qty) {
+        showToast('error', 'Stock Limit', `Cannot exceed stock: ${product.qty}`);
+        return;
       }
-      return [...prev, { 
+      setCart(prev => prev.map(item =>
+        item.id === product.id ? { ...item, qty: newQty } : item
+      ));
+      showToast('success', 'Added', `${product.name} x${existingItem.qty + quantity}`);
+    } else {
+      setCart(prev => [...prev, { 
         id: product.id, 
         name: product.name, 
         qty: quantity, 
         price: product.saleRate,
-      }];
-    });
+        regularPrice: product.saleRate,
+        purchaseRate: product.purchaseRate,
+        isPriceOverridden: false,
+      }]);
+      showToast('success', 'Added', `${product.name} x${quantity} at ${currency.symbol}${product.saleRate}`);
+    }
 
     setSearchTerm("");
     setSelectedProduct(null);
     setQty("1");
-    showToast('success', 'Added', `${product.name} x${quantity}`);
-  }, [products, searchTerm, qty, selectedProduct]);
+  }, [products, searchTerm, qty, selectedProduct, showToast, cart, currency.symbol]);
 
   // Remove item from cart
   const removeFromCart = (itemId: string) => {
     setCart(prev => prev.filter(c => c.id !== itemId));
-    setItemDiscount(prev => {
-      const newDiscounts = { ...prev };
-      delete newDiscounts[itemId];
-      return newDiscounts;
-    });
   };
 
   // Update cart quantity
@@ -825,33 +1027,13 @@ export default function WholesaleSales() {
     ));
   };
 
-  // Add discount to item
-  const addItemDiscount = (itemId: string) => {
-    const amount = parseFloat(discountAmount);
-    if (isNaN(amount) || amount < 0 || amount > 100) {
-      showToast('error', 'Invalid Discount', 'Please enter a valid discount (0-100%)');
-      return;
-    }
-    
-    setItemDiscount(prev => ({
-      ...prev,
-      [itemId]: { amount, type: discountType }
-    }));
-    
-    setShowDiscountModal(false);
-    setDiscountItemId(null);
-    setDiscountAmount("");
-    showToast('success', 'Discount Added', `Discount applied to item`);
-  };
-
-  // Start camera scanner with touch-friendly interface
+  // Start camera scanner
   const startCameraScan = async () => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       showToast('error', 'Camera Error', 'Camera not supported on this device');
       return;
     }
     
-    // Close any existing scanner first
     if (codeReaderRef.current) {
       codeReaderRef.current.reset();
       codeReaderRef.current = null;
@@ -862,99 +1044,16 @@ export default function WholesaleSales() {
   };
 
   // Print invoice
-  const printInvoice = (invoice: Invoice) => {
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) return;
+  const handlePrintInvoice = (invoice: Invoice) => {
+    const enrichedInvoice = {
+      ...invoice,
+      customerPhone: invoice.customerPhone || selectedCustomer?.phone || "",
+      customerAddress: invoice.customerAddress || selectedCustomer?.address || "",
+      totalProfit: invoice.totalProfit || totalProfit,
+    };
     
-    printWindow.document.write(`
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Invoice ${invoice.invoiceNumber}</title>
-        <style>
-          body { font-family: 'Courier New', monospace; margin: 0; padding: 20px; background: white; }
-          .invoice { max-width: 300px; margin: 0 auto; }
-          .header { text-align: center; margin-bottom: 20px; border-bottom: 1px dashed #000; padding-bottom: 10px; }
-          .shop-name { font-size: 20px; font-weight: bold; margin-bottom: 5px; }
-          .invoice-title { font-size: 16px; margin: 10px 0; }
-          .customer-details { margin: 15px 0; padding: 10px; background: #f9f9f9; border: 1px solid #ddd; }
-          table { width: 100%; border-collapse: collapse; margin: 15px 0; }
-          th, td { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; }
-          th { font-size: 12px; }
-          td { font-size: 12px; }
-          .totals { text-align: right; margin-top: 15px; padding-top: 10px; border-top: 1px dashed #000; }
-          .totals p { margin: 5px 0; font-size: 12px; }
-          .balance { color: #f97316; font-weight: bold; }
-          .footer { text-align: center; margin-top: 30px; font-size: 10px; }
-          @media print { body { padding: 0; } .no-print { display: none; } }
-        </style>
-      </head>
-      <body>
-        <div class="invoice">
-          <div class="header">
-            <div class="shop-name">${shopName || 'Wholesale Trading'}</div>
-            <div class="invoice-title">SALE INVOICE</div>
-            <div>#: ${invoice.invoiceNumber}</div>
-            <div>Date: ${new Date().toLocaleDateString()}</div>
-            <div>Time: ${new Date().toLocaleTimeString()}</div>
-          </div>
-          
-          <div class="customer-details">
-            <strong>Customer:</strong> ${invoice.customerName}<br/>
-          </div>
-          
-          <table>
-            <thead>
-              <tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr>
-            </thead>
-            <tbody>
-              ${invoice.items.map(item => {
-                let itemTotal = item.price * item.qty;
-                if (item.discount && item.discount > 0) {
-                  if (item.discountType === 'percentage') {
-                    itemTotal = itemTotal * (1 - item.discount / 100);
-                  } else {
-                    itemTotal = itemTotal - item.discount;
-                  }
-                }
-                const discountText = item.discount ? ` (-${item.discount}${item.discountType === 'percentage' ? '%' : ''})` : '';
-                return `
-                  <tr>
-                    <td>${item.name}${discountText}</td>
-                    <td style="text-align:center">${item.qty}</td>
-                    <td style="text-align:right">${currency.symbol}${item.price.toLocaleString()}</td>
-                    <td style="text-align:right">${currency.symbol}${Math.round(itemTotal).toLocaleString()}</td>
-                  </tr>
-                `;
-              }).join('')}
-            </tbody>
-          </table>
-          
-          <div class="totals">
-            <p>Subtotal: ${currency.symbol}${Math.round(invoice.subtotal).toLocaleString()}</p>
-            ${invoice.discount > 0 ? `<p>Discount: -${currency.symbol}${Math.round(invoice.discount).toLocaleString()}</p>` : ''}
-            <p><strong>Total: ${currency.symbol}${Math.round(invoice.total).toLocaleString()}</strong></p>
-            <p>Paid: ${currency.symbol}${Math.round(invoice.paid).toLocaleString()}</p>
-            ${invoice.balance > 0 ? `<p class="balance">Balance: ${currency.symbol}${Math.round(invoice.balance).toLocaleString()}</p>` : ''}
-            <p>Status: ${invoice.paymentStatus.toUpperCase()}</p>
-          </div>
-          
-          ${invoice.notes ? `<div style="margin-top: 15px;"><strong>Notes:</strong><br/>${invoice.notes}</div>` : ''}
-          
-          <div class="footer">
-            <p>Thank you for your business!</p>
-            <p>Powered by Stockaro</p>
-          </div>
-        </div>
-        <div class="no-print" style="text-align:center; margin-top:20px;">
-          <button onclick="window.print()" style="padding:10px 20px; margin:0 5px;">Print</button>
-          <button onclick="window.close()" style="padding:10px 20px;">Close</button>
-        </div>
-        <script>window.onload = () => setTimeout(() => window.print(), 500);</script>
-      </body>
-      </html>
-    `);
-    printWindow.document.close();
+    setInvoiceToPrint(enrichedInvoice);
+    setShowPrintModal(true);
   };
 
   // Cleanup
@@ -975,6 +1074,24 @@ export default function WholesaleSales() {
         <div className="text-center">
           <div className="animate-spin rounded-full h-16 w-16 border-4 border-gray-900 border-t-transparent mx-auto mb-4"></div>
           <p className="text-gray-600">Loading Wholesale POS...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!authUser) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center max-w-md mx-auto p-8">
+          <div className="text-6xl mb-4">🔐</div>
+          <h2 className="text-2xl font-bold text-gray-900 mb-2">Authentication Required</h2>
+          <p className="text-gray-600 mb-6">Please log in to access the POS system.</p>
+          <Link 
+            href="/login"
+            className="inline-block bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-xl font-semibold transition-all"
+          >
+            Go to Login
+          </Link>
         </div>
       </div>
     );
@@ -1018,30 +1135,64 @@ export default function WholesaleSales() {
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <Link href="/owner-dashboard">
-                <Image src="/stockaro-logo.png" alt="Logo" width={40} height={40} className="rounded-lg" />
+                <Image src="/stockaro-logo.png" alt="Logo" width={40} height={40} className="rounded-lg cursor-pointer hover:opacity-80 transition-opacity" />
               </Link>
               <div>
                 <h1 className="text-2xl font-bold">Wholesale Sales</h1>
-                <p className="text-sm text-gray-300">{shopName || activeBranch?.shopName || 'Select Branch'}</p>
+                <p className="text-sm text-gray-300">{selectedBranch?.shopName || 'Select Branch'}</p>
               </div>
             </div>
             
             <div className="flex items-center gap-3">
+              <Link 
+                href="/owner-dashboard"
+                className="bg-purple-500 hover:bg-purple-600 px-4 py-2 rounded-lg text-sm font-semibold transition-all flex items-center gap-2"
+              >
+                <span>📊</span> Dashboard
+              </Link>
+
+              {branches.length > 0 && (
+                <select
+                  value={activeBranchId || ""}
+                  onChange={(e) => {
+                    const branchId = e.target.value;
+                    setActiveBranchId(branchId);
+                    const branch = branches.find(b => b.id === branchId);
+                    setSelectedBranch(branch);
+                    setProducts([]);
+                    setCart([]);
+                    setSelectedCustomer(null);
+                  }}
+                  className="bg-white/10 border border-white/20 rounded-xl px-4 py-2 text-white text-sm focus:outline-none"
+                  disabled={isLoading}
+                >
+                  <option value="" className="text-gray-900">Select Branch</option>
+                  {branches.map(branch => (
+                    <option key={branch.id} value={branch.id} className="text-gray-900">
+                      {branch.shopName}
+                    </option>
+                  ))}
+                </select>
+              )}
+              
               {currentUser && (
                 <div className="bg-white/10 px-4 py-2 rounded-lg">
                   <span className="font-semibold">{currentUser.name}</span>
                 </div>
               )}
+              
               <div className="bg-white/10 px-3 py-2 rounded-lg">
                 <span>{currency.symbol}</span>
               </div>
-              <button
-                onClick={() => setShowInvoiceList(!showInvoiceList)}
-                className="bg-blue-500 hover:bg-blue-600 px-4 py-2 rounded-lg text-sm font-semibold transition-all"
-                disabled={isProcessing}
+              
+              {/* UPDATED: Invoices button changed to Link to invoice management */}
+              <Link
+                href="/invoice-management"
+                className="bg-blue-500 hover:bg-blue-600 px-4 py-2 rounded-lg text-sm font-semibold transition-all inline-flex items-center gap-2"
               >
                 📋 Invoices
-              </button>
+              </Link>
+              
               <Link 
                 href="/credit-list"
                 className="bg-orange-500 hover:bg-orange-600 px-4 py-2 rounded-lg text-sm font-semibold transition-all"
@@ -1057,7 +1208,7 @@ export default function WholesaleSales() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Left Column - Products & Cart */}
           <div className="lg:col-span-2 space-y-6">
-            {/* Product Search & Scanner - Combined with button inside search field */}
+            {/* Product Search & Scanner */}
             <div className="bg-white rounded-2xl shadow-lg p-6">
               <h2 className="text-xl font-bold mb-4 flex items-center gap-2">🔍 Search Products</h2>
               
@@ -1067,7 +1218,7 @@ export default function WholesaleSales() {
                     type="text"
                     placeholder="Search by name or scan barcode..."
                     className={`w-full px-4 py-3 pr-12 rounded-xl border-2 focus:border-blue-500 outline-none transition-all duration-200 ${
-                      isScanning ? 'border-green-400 bg-green-50' : 'border-gray-300 hover:border-gray-400'
+                      isScanningInProgress ? 'border-green-400 bg-green-50' : 'border-gray-300 hover:border-gray-400'
                     }`}
                     value={searchTerm}
                     onChange={(e) => {
@@ -1083,7 +1234,6 @@ export default function WholesaleSales() {
                     autoFocus
                   />
                   
-                  {/* Camera button inside search field */}
                   <button
                     onClick={startCameraScan}
                     className={`absolute right-3 top-1/2 -translate-y-1/2 p-2 rounded-lg transition-all group ${
@@ -1112,8 +1262,23 @@ export default function WholesaleSales() {
                           {p.barcode && <div className="text-xs text-gray-500 mt-1">Barcode: {p.barcode}</div>}
                           <div className="text-sm text-gray-500 flex gap-3 mt-1">
                             <span>Stock: {p.qty}</span>
-                            <span>Price: {currency.symbol}{p.saleRate.toLocaleString()}</span>
+                            <span>Regular: {currency.symbol}{p.saleRate.toLocaleString()}</span>
+                            <span className="text-gray-400">Cost: {currency.symbol}{p.purchaseRate.toLocaleString()}</span>
                           </div>
+                          <div className="text-xs text-green-600 mt-1">
+                            Profit: {currency.symbol}{(p.saleRate - p.purchaseRate).toLocaleString()} ({((p.saleRate - p.purchaseRate) / p.purchaseRate * 100).toFixed(1)}%)
+                          </div>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setPriceOverrideProduct(p);
+                              setOverridePrice(p.saleRate.toString());
+                              setShowPriceModal(true);
+                            }}
+                            className="mt-2 text-xs bg-purple-100 hover:bg-purple-200 text-purple-700 px-2 py-1 rounded-lg transition-colors"
+                          >
+                            💰 Override Price
+                          </button>
                         </div>
                       ))}
                     </div>
@@ -1129,17 +1294,30 @@ export default function WholesaleSales() {
                         <p className="text-xl font-bold text-blue-600 mt-1">
                           {currency.symbol}{selectedProduct.saleRate.toLocaleString()}
                         </p>
+                        <p className="text-xs text-gray-500">Purchase: {currency.symbol}{selectedProduct.purchaseRate.toLocaleString()}</p>
+                        <p className="text-xs text-green-600">Profit: {currency.symbol}{(selectedProduct.saleRate - selectedProduct.purchaseRate).toLocaleString()}</p>
                       </div>
-                      <button
-                        onClick={() => {
-                          setSelectedProduct(null);
-                          setSearchTerm("");
-                        }}
-                        className="text-gray-400 hover:text-gray-600 text-xl font-bold"
-                        title="Clear selection"
-                      >
-                        ✕
-                      </button>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => {
+                            setPriceOverrideProduct(selectedProduct);
+                            setOverridePrice(selectedProduct.saleRate.toString());
+                            setShowPriceModal(true);
+                          }}
+                          className="text-purple-600 hover:text-purple-800 text-sm font-semibold underline"
+                        >
+                          Override Price
+                        </button>
+                        <button
+                          onClick={() => {
+                            setSelectedProduct(null);
+                            setSearchTerm("");
+                          }}
+                          className="text-gray-400 hover:text-gray-600 text-xl font-bold"
+                        >
+                          ✕
+                        </button>
+                      </div>
                     </div>
                     
                     <div className="flex gap-3">
@@ -1149,7 +1327,6 @@ export default function WholesaleSales() {
                         value={qty}
                         onChange={(e) => setQty(e.target.value)}
                         className="w-24 px-3 py-2 border border-gray-300 rounded-lg text-center focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
-                        placeholder="Qty"
                       />
                       <button
                         onClick={addToCart}
@@ -1169,13 +1346,9 @@ export default function WholesaleSales() {
               <div className="flex justify-between items-center mb-6">
                 <h2 className="text-xl font-bold flex items-center gap-2">🛒 Cart ({cart.length} items)</h2>
                 {cart.length > 0 && (
-                  <button
-                    onClick={() => setShowDiscountModal(true)}
-                    className="bg-purple-500 hover:bg-purple-600 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-all"
-                    disabled={cart.length === 0}
-                  >
-                    💰 Discount
-                  </button>
+                  <div className="text-sm font-semibold text-green-600">
+                    Total Profit: {currency.symbol}{totalProfit.toLocaleString()}
+                  </div>
                 )}
               </div>
 
@@ -1187,51 +1360,54 @@ export default function WholesaleSales() {
                 </div>
               ) : (
                 <div className="space-y-3 max-h-96 overflow-y-auto">
-                  {cart.map((item, idx) => {
-                    const itemDiscountData = itemDiscount[item.id];
+                  {cart.map((item) => {
                     const itemTotal = item.price * item.qty;
-                    let discountedTotal = itemTotal;
-                    if (itemDiscountData) {
-                      if (itemDiscountData.type === 'percentage') {
-                        discountedTotal = itemTotal * (1 - itemDiscountData.amount / 100);
-                      } else {
-                        discountedTotal = itemTotal - (itemDiscountData.amount * item.qty);
-                      }
-                    }
+                    const profit = (item.price - item.purchaseRate) * item.qty;
+                    const profitPercent = ((item.price - item.purchaseRate) / item.purchaseRate) * 100;
+                    const isOverridden = item.isPriceOverridden;
                     
                     return (
-                      <div key={item.id} className="bg-gray-50 border border-gray-200 p-4 rounded-xl hover:shadow-md transition-all">
+                      <div key={item.id} className={`border p-4 rounded-xl hover:shadow-md transition-all ${isOverridden ? 'bg-purple-50 border-purple-200' : 'bg-gray-50 border-gray-200'}`}>
                         <div className="flex justify-between items-start gap-3">
                           <div className="flex-1 min-w-0">
-                            <div className="font-semibold text-gray-900 truncate">{item.name}</div>
-                            <div className="text-sm text-gray-600 flex flex-wrap gap-2 items-center">
+                            <div className="font-semibold text-gray-900 truncate flex items-center gap-2">
+                              {item.name}
+                              {isOverridden && (
+                                <span className="text-xs bg-purple-200 text-purple-800 px-2 py-0.5 rounded-full">Price Adjusted</span>
+                              )}
+                            </div>
+                            <div className="text-sm text-gray-600 flex flex-wrap gap-2 items-center mt-1">
                               <span>{currency.symbol}{item.price.toLocaleString()} × {item.qty}</span>
-                              {itemDiscountData && (
-                                <span className="bg-green-100 text-green-800 px-2 py-1 rounded-full text-xs">
-                                  {itemDiscountData.type === 'percentage' 
-                                    ? `-${itemDiscountData.amount}%` 
-                                    : `-${currency.symbol}${itemDiscountData.amount}`
-                                  }
+                              {isOverridden && (
+                                <span className="text-xs text-gray-400 line-through">
+                                  (Regular: {currency.symbol}{item.regularPrice.toLocaleString()})
                                 </span>
                               )}
                               <span className="text-gray-500 ml-auto">
-                                {currency.symbol}{Math.round(discountedTotal).toLocaleString()}
+                                = {currency.symbol}{Math.round(itemTotal).toLocaleString()}
                               </span>
+                            </div>
+                            <div className={`text-xs mt-1 ${profit > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                              Profit: {currency.symbol}{profit.toLocaleString()} ({profitPercent.toFixed(1)}%)
                             </div>
                           </div>
                           <div className="flex items-center gap-2 flex-shrink-0">
                             <button
-                              onClick={() => {
-                                setDiscountItemId(item.id);
-                                setDiscountAmount(itemDiscountData?.amount?.toString() || "");
-                                setDiscountType(itemDiscountData?.type || 'percentage');
-                                setShowDiscountModal(true);
-                              }}
+                              onClick={() => editCartItemPrice(item.id, item.price, item.regularPrice, item.purchaseRate)}
                               className="text-purple-500 hover:text-purple-700 p-1 hover:bg-purple-100 rounded-lg transition-all"
-                              title="Edit discount"
+                              title="Override price"
                             >
-                              💸
+                              💰
                             </button>
+                            {isOverridden && (
+                              <button
+                                onClick={() => resetCartItemPrice(item.id, item.regularPrice)}
+                                className="text-blue-500 hover:text-blue-700 p-1 hover:bg-blue-100 rounded-lg transition-all"
+                                title="Reset to regular price"
+                              >
+                                🔄
+                              </button>
+                            )}
                             <input
                               type="number"
                               min="1"
@@ -1272,6 +1448,14 @@ export default function WholesaleSales() {
                       <div className="font-bold text-lg text-green-900">{selectedCustomer.name}</div>
                       {selectedCustomer.phone && (
                         <div className="text-sm text-green-700 mt-1">📞 {selectedCustomer.phone}</div>
+                      )}
+                      {selectedCustomer.address && (
+                        <div className="text-sm text-green-700 mt-1">📍 {selectedCustomer.address}</div>
+                      )}
+                      {selectedCustomer.openingBalance !== 0 && (
+                        <div className="text-sm text-orange-600 mt-1">
+                          Opening Balance: {currency.symbol}{selectedCustomer.openingBalance.toLocaleString()}
+                        </div>
                       )}
                     </div>
                     <button
@@ -1318,24 +1502,13 @@ export default function WholesaleSales() {
               </div>
             </div>
 
-            {/* Credit Option */}
+            {/* Credit Option - Visual only, all invoices are credit by default */}
             <div className="bg-white rounded-2xl shadow-lg p-6">
-              <label className="flex items-center gap-3 p-3 bg-orange-50 rounded-xl cursor-pointer hover:bg-orange-100 transition-all">
-                <input
-                  type="checkbox"
-                  checked={isCredit}
-                  onChange={(e) => setIsCredit(e.target.checked)}
-                  className="w-5 h-5 text-orange-600 rounded focus:ring-orange-500"
-                />
-                <span className="font-semibold text-orange-900">Credit Sale (Pay Later)</span>
-              </label>
-              {isCredit && (
-                <div className="mt-3 p-3 bg-orange-50 border border-orange-200 rounded-lg">
-                  <p className="text-sm text-orange-800">
-                    ⚠️ Customer will owe {currency.symbol}{totals.total.toLocaleString()}
-                  </p>
-                </div>
-              )}
+              <div className="p-3 bg-blue-50 rounded-xl">
+                <p className="text-sm text-blue-800">
+                  ℹ️ All invoices are created as CREDIT (Unpaid). You can add payments later in Invoice Management.
+                </p>
+              </div>
             </div>
 
             {/* Notes */}
@@ -1358,7 +1531,7 @@ export default function WholesaleSales() {
                   <span>Subtotal</span>
                   <span>{currency.symbol}{totals.subtotal.toLocaleString()}</span>
                 </div>
-                {(Object.keys(itemDiscount).length > 0 || globalDiscount > 0) && (
+                {totals.discount > 0 && (
                   <div className="flex justify-between text-green-400 text-sm">
                     <span>Discount</span>
                     <span>-{currency.symbol}{totals.discount.toLocaleString()}</span>
@@ -1368,30 +1541,120 @@ export default function WholesaleSales() {
                   <span className="font-bold">Total</span>
                   <span className="text-2xl font-bold">{currency.symbol}{Math.round(totals.total).toLocaleString()}</span>
                 </div>
+                <div className="flex justify-between text-green-400 text-sm pt-2">
+                  <span>Total Profit</span>
+                  <span className="font-semibold">+{currency.symbol}{totalProfit.toLocaleString()}</span>
+                </div>
               </div>
               
               <button
                 onClick={createInvoice}
-                disabled={!selectedCustomer || cart.length === 0 || isProcessing}
-                className={`w-full py-4 rounded-xl font-bold text-lg shadow-lg transition-all transform hover:scale-[1.02] ${
-                  !selectedCustomer || cart.length === 0 || isProcessing
-                    ? 'bg-gray-600 cursor-not-allowed'
-                    : isCredit 
-                      ? 'bg-orange-600 hover:bg-orange-700'
-                      : 'bg-green-600 hover:bg-green-700'
-                }`}
+                disabled={!selectedCustomer || cart.length === 0 || isProcessing || !activeBranchId}
+                className="w-full py-4 rounded-xl font-bold text-lg shadow-lg transition-all transform hover:scale-[1.02] bg-orange-600 hover:bg-orange-700"
               >
                 {isProcessing ? (
-                  <span className="flex items-center gap-2">
+                  <span className="flex items-center gap-2 justify-center">
                     <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
                     Processing...
                   </span>
-                ) : isCredit ? '💳 Create Credit Invoice' : '✅ Create Invoice'}
+                ) : (
+                  '📝 Create Invoice (Unpaid)'
+                )}
               </button>
             </div>
           </div>
         </div>
       </main>
+
+      {/* Price Override Modal */}
+      {showPriceModal && priceOverrideProduct && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl">
+            <div className="bg-gradient-to-r from-purple-500 to-purple-600 text-white p-6 rounded-t-2xl">
+              <div className="flex justify-between items-center">
+                <h3 className="text-2xl font-bold">💰 Override Sale Price</h3>
+                <button 
+                  onClick={() => {
+                    setShowPriceModal(false);
+                    setPriceOverrideProduct(null);
+                    setOverridePrice("");
+                  }} 
+                  className="text-3xl hover:scale-110 transition-transform"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+            <div className="p-6 space-y-4">
+              <div>
+                <p className="text-sm text-gray-600 mb-1">Product</p>
+                <p className="font-bold text-lg">{priceOverrideProduct.name}</p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-600 mb-1">Purchase Price (Your Cost)</p>
+                <p className="font-semibold text-orange-600">{currency.symbol}{priceOverrideProduct.purchaseRate.toLocaleString()}</p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-600 mb-1">Regular Sale Price</p>
+                <p className="font-semibold text-blue-600">{currency.symbol}{priceOverrideProduct.saleRate.toLocaleString()}</p>
+                <p className="text-xs text-green-600">Regular Profit: {currency.symbol}{(priceOverrideProduct.saleRate - priceOverrideProduct.purchaseRate).toLocaleString()}</p>
+              </div>
+              <div>
+                <label className="block text-sm font-semibold mb-2">Override Price ({currency.symbol})</label>
+                <input
+                  type="number"
+                  step="1"
+                  min={priceOverrideProduct.purchaseRate}
+                  value={overridePrice}
+                  onChange={(e) => {
+                    setOverridePrice(e.target.value);
+                    const newPrice = parseFloat(e.target.value);
+                    if (!isNaN(newPrice)) {
+                      setIsIncreasingProfit(newPrice > priceOverrideProduct.saleRate);
+                    }
+                  }}
+                  className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+                  placeholder="Enter sale price"
+                  autoFocus
+                />
+                {overridePrice && !isNaN(parseFloat(overridePrice)) && (
+                  <div className={`mt-2 text-sm ${parseFloat(overridePrice) > priceOverrideProduct.saleRate ? 'text-green-600' : parseFloat(overridePrice) < priceOverrideProduct.saleRate ? 'text-orange-600' : 'text-gray-500'}`}>
+                    {parseFloat(overridePrice) > priceOverrideProduct.saleRate ? (
+                      <>⬆️ Profit increase: +{currency.symbol}{(parseFloat(overridePrice) - priceOverrideProduct.saleRate).toLocaleString()}</>
+                    ) : parseFloat(overridePrice) < priceOverrideProduct.saleRate ? (
+                      <>⬇️ Profit decrease: -{currency.symbol}{(priceOverrideProduct.saleRate - parseFloat(overridePrice)).toLocaleString()}</>
+                    ) : (
+                      <>➡️ Regular price (no change)</>
+                    )}
+                  </div>
+                )}
+                <p className="text-xs text-red-500 mt-2">
+                  ⚠️ Cannot go below purchase price ({currency.symbol}{priceOverrideProduct.purchaseRate})
+                </p>
+              </div>
+              <div className="flex gap-3 pt-4">
+                <button
+                  onClick={() => {
+                    setShowPriceModal(false);
+                    setPriceOverrideProduct(null);
+                    setOverridePrice("");
+                  }}
+                  className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-all"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={overrideProductPrice}
+                  disabled={isProcessing}
+                  className="flex-1 bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-semibold transition-all"
+                >
+                  Apply Override
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Invoice List Modal */}
       {showInvoiceList && (
@@ -1431,17 +1694,26 @@ export default function WholesaleSales() {
                           <p className="text-2xl font-bold text-gray-900">
                             {currency.symbol}{Math.round(invoice.total).toLocaleString()}
                           </p>
-                          <p className={`text-sm font-semibold mt-1 px-3 py-1 rounded-full ${
+                          <p className={`text-sm font-semibold mt-1 px-3 py-1 rounded-full inline-block ${
                             invoice.paymentStatus === 'paid' 
                               ? 'bg-green-100 text-green-800' 
-                              : 'bg-orange-100 text-orange-800'
+                              : invoice.paymentStatus === 'partial'
+                              ? 'bg-yellow-100 text-yellow-800'
+                              : 'bg-red-100 text-red-800'
                           }`}>
-                            {invoice.paymentStatus === 'paid' ? '✅ Paid' : `⏳ Due ${currency.symbol}${Math.round(invoice.balance).toLocaleString()}`}
+                            {invoice.paymentStatus === 'paid' 
+                              ? '✅ Paid' 
+                              : invoice.paymentStatus === 'partial'
+                              ? `💰 Partial (${currency.symbol}${Math.round(invoice.paid).toLocaleString()} paid)`
+                              : `⚠️ Unpaid (${currency.symbol}${Math.round(invoice.balance).toLocaleString()} due)`}
                           </p>
+                          {invoice.totalProfit && (
+                            <p className="text-xs text-green-600 mt-1">Profit: {currency.symbol}{Math.round(invoice.totalProfit).toLocaleString()}</p>
+                          )}
                         </div>
                         <div className="flex gap-2 flex-wrap">
                           <button
-                            onClick={() => printInvoice(invoice)}
+                            onClick={() => handlePrintInvoice(invoice)}
                             className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-semibold transition-all shadow-md"
                           >
                             🖨️ Print
@@ -1540,116 +1812,6 @@ export default function WholesaleSales() {
         </div>
       )}
 
-      {/* Discount Modal */}
-      {showDiscountModal && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl">
-            <div className="bg-gradient-to-r from-purple-500 to-purple-600 text-white p-6 rounded-t-2xl">
-              <div className="flex justify-between items-center">
-                <h3 className="text-2xl font-bold">💰 Apply Discount</h3>
-                <button 
-                  onClick={() => {
-                    setShowDiscountModal(false);
-                    setDiscountItemId(null);
-                    setDiscountAmount("");
-                  }} 
-                  className="text-3xl hover:scale-110 transition-transform"
-                >
-                  ✕
-                </button>
-              </div>
-            </div>
-            <div className="p-6 space-y-4">
-              <div>
-                <label className="block text-sm font-semibold mb-2">Discount Type</label>
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => setDiscountType('percentage')}
-                    className={`flex-1 py-2 rounded-lg font-semibold transition-all ${
-                      discountType === 'percentage'
-                        ? 'bg-purple-600 text-white'
-                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                    }`}
-                  >
-                    Percentage (%)
-                  </button>
-                  <button
-                    onClick={() => setDiscountType('fixed')}
-                    className={`flex-1 py-2 rounded-lg font-semibold transition-all ${
-                      discountType === 'fixed'
-                        ? 'bg-purple-600 text-white'
-                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                    }`}
-                  >
-                    Fixed ({currency.symbol})
-                  </button>
-                </div>
-              </div>
-              <div>
-                <label className="block text-sm font-semibold mb-2">
-                  {discountType === 'percentage' ? 'Discount Percentage (%)' : `Discount Amount (${currency.symbol})`}
-                </label>
-                <input
-                  type="number"
-                  step={discountType === 'percentage' ? '0.01' : '1'}
-                  min="0"
-                  max={discountType === 'percentage' ? '100' : undefined}
-                  value={discountAmount}
-                  onChange={(e) => setDiscountAmount(e.target.value)}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
-                  placeholder={discountType === 'percentage' ? 'e.g., 10' : 'e.g., 500'}
-                  autoFocus
-                />
-              </div>
-              <div className="flex gap-3 pt-4">
-                <button
-                  onClick={() => {
-                    setShowDiscountModal(false);
-                    setDiscountItemId(null);
-                    setDiscountAmount("");
-                  }}
-                  className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-all"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={() => {
-                    if (discountItemId) {
-                      addItemDiscount(discountItemId);
-                    } else {
-                      // Global discount
-                      const amount = parseFloat(discountAmount);
-                      if (!isNaN(amount) && amount >= 0) {
-                        if (discountType === 'percentage' && amount <= 100) {
-                          setGlobalDiscount(amount);
-                          setGlobalDiscountType('percentage');
-                          setShowDiscountModal(false);
-                          setDiscountAmount("");
-                          showToast('success', 'Discount Applied', `${amount}% discount applied to all items`);
-                        } else if (discountType === 'fixed') {
-                          setGlobalDiscount(amount);
-                          setGlobalDiscountType('fixed');
-                          setShowDiscountModal(false);
-                          setDiscountAmount("");
-                          showToast('success', 'Discount Applied', `${currency.symbol}${amount} discount applied`);
-                        } else {
-                          showToast('error', 'Invalid', 'Please enter a valid discount');
-                        }
-                      } else {
-                        showToast('error', 'Invalid', 'Please enter a valid discount');
-                      }
-                    }
-                  }}
-                  className="flex-1 bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-semibold transition-all"
-                >
-                  Apply Discount
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Customer Selection Modal */}
       {showCustomerModal && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
@@ -1676,7 +1838,7 @@ export default function WholesaleSales() {
                   <div className="mb-4">
                     <input
                       type="text"
-                      placeholder="Search by name or phone..."
+                      placeholder="Search by name, phone or address..."
                       value={customerSearchTerm}
                       onChange={(e) => setCustomerSearchTerm(e.target.value)}
                       className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
@@ -1688,6 +1850,7 @@ export default function WholesaleSales() {
                     {filteredCustomers.length === 0 ? (
                       <div className="text-center py-8 text-gray-400">
                         <p>No customers found</p>
+                        <p className="text-sm mt-1">Click "Create New Customer" to add one</p>
                       </div>
                     ) : (
                       filteredCustomers.map(customer => (
@@ -1697,12 +1860,21 @@ export default function WholesaleSales() {
                             setSelectedCustomer(customer);
                             setShowCustomerModal(false);
                             setCustomerSearchTerm("");
+                            showToast('success', 'Customer Selected', customer.name);
                           }}
                           className="p-4 border border-gray-200 rounded-xl hover:bg-blue-50 cursor-pointer transition-all hover:border-blue-300"
                         >
                           <p className="font-semibold text-gray-900">{customer.name}</p>
                           {customer.phone && (
-                            <p className="text-sm text-gray-500 mt-1">{customer.phone}</p>
+                            <p className="text-sm text-gray-500 mt-1">📞 {customer.phone}</p>
+                          )}
+                          {customer.address && (
+                            <p className="text-sm text-gray-500 mt-1">📍 {customer.address}</p>
+                          )}
+                          {customer.openingBalance !== 0 && (
+                            <p className="text-xs text-orange-600 mt-1">
+                              Opening Balance: {currency.symbol}{customer.openingBalance.toLocaleString()}
+                            </p>
                           )}
                         </div>
                       ))
@@ -1739,12 +1911,38 @@ export default function WholesaleSales() {
                       placeholder="Phone number (optional)"
                     />
                   </div>
+                  <div>
+                    <label className="block text-sm font-semibold mb-2">Address</label>
+                    <textarea
+                      value={newCustomerAddress}
+                      onChange={(e) => setNewCustomerAddress(e.target.value)}
+                      rows={2}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:border-green-500 focus:outline-none focus:ring-2 focus:ring-green-200 resize-vertical"
+                      placeholder="Customer address (optional)"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold mb-2">Opening Balance ({currency.symbol})</label>
+                    <input
+                      type="number"
+                      step="1"
+                      value={newCustomerOpeningBalance}
+                      onChange={(e) => setNewCustomerOpeningBalance(e.target.value)}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:border-green-500 focus:outline-none focus:ring-2 focus:ring-green-200"
+                      placeholder="0"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Positive amount means customer owes you money
+                    </p>
+                  </div>
                   <div className="flex gap-3 pt-4">
                     <button
                       onClick={() => {
                         setShowCreateCustomer(false);
                         setNewCustomerName("");
                         setNewCustomerPhone("");
+                        setNewCustomerAddress("");
+                        setNewCustomerOpeningBalance("");
                       }}
                       className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-all"
                     >
@@ -1788,14 +1986,18 @@ export default function WholesaleSales() {
               <div className="bg-green-50 border border-green-200 rounded-xl p-4 mb-6 text-center">
                 <p className="text-lg font-semibold text-green-800">Invoice #{createdInvoice.invoiceNumber}</p>
                 <p className="text-sm text-green-700">Total: {currency.symbol}{Math.round(createdInvoice.total).toLocaleString()}</p>
-                {createdInvoice.paymentStatus === 'credit' && (
-                  <p className="text-sm text-orange-700 mt-1">Credit Sale - Balance Due: {currency.symbol}{Math.round(createdInvoice.balance).toLocaleString()}</p>
-                )}
+                <p className="text-sm text-green-700 mt-1">Total Profit: {currency.symbol}{Math.round(createdInvoice.totalProfit || totalProfit).toLocaleString()}</p>
+                <p className="text-sm text-orange-700 mt-1 font-semibold">
+                  ⚠️ Status: UNPAID - Balance Due: {currency.symbol}{Math.round(createdInvoice.balance).toLocaleString()}
+                </p>
+                <p className="text-xs text-gray-600 mt-2">
+                  💡 You can add payment in Invoice Management page
+                </p>
               </div>
               
               <div className="flex gap-3">
                 <button
-                  onClick={() => printInvoice(createdInvoice)}
+                  onClick={() => handlePrintInvoice(createdInvoice)}
                   className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-4 py-3 rounded-xl font-semibold transition-all"
                 >
                   🖨️ Print Invoice
@@ -1815,10 +2017,9 @@ export default function WholesaleSales() {
         </div>
       )}
 
-      {/* Camera Modal - Improved for mobile */}
+      {/* Camera Modal */}
       {isCameraActive && (
         <div className="fixed inset-0 bg-black z-[100] flex flex-col">
-          {/* Header with close button */}
           <div className="bg-gradient-to-r from-purple-600 to-purple-700 text-white p-4 flex justify-between items-center shadow-lg">
             <div>
               <h3 className="text-lg font-bold">📷 Barcode Scanner</h3>
@@ -1832,7 +2033,6 @@ export default function WholesaleSales() {
             </button>
           </div>
           
-          {/* Camera view */}
           <div className="flex-1 relative bg-black">
             <div 
               ref={scannerContainerRef} 
@@ -1847,7 +2047,6 @@ export default function WholesaleSales() {
               )}
             </div>
             
-            {/* Scanning frame */}
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <div className="w-4/5 h-1/3 border-2 border-green-400 rounded-lg shadow-lg">
                 <div className="absolute top-0 left-0 w-8 h-8 border-t-2 border-l-2 border-green-400"></div>
@@ -1860,7 +2059,6 @@ export default function WholesaleSales() {
               </div>
             </div>
             
-            {/* Error message */}
             {cameraError && (
               <div className="absolute inset-0 flex items-center justify-center bg-black/90">
                 <div className="text-center p-6">
@@ -1880,7 +2078,6 @@ export default function WholesaleSales() {
             )}
           </div>
           
-          {/* Bottom controls */}
           <div className="bg-gray-900 p-4">
             <button
               onClick={closeCamera}
@@ -1893,6 +2090,19 @@ export default function WholesaleSales() {
             </p>
           </div>
         </div>
+      )}
+
+      {/* Invoice Print Modal */}
+      {showPrintModal && invoiceToPrint && (
+        <InvoicePrint
+          invoice={invoiceToPrint}
+          shopName={selectedBranch?.shopName || "Wholesale Trading"}
+          currency={currency}
+          onClose={() => {
+            setShowPrintModal(false);
+            setInvoiceToPrint(null);
+          }}
+        />
       )}
 
       <style jsx>{`

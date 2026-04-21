@@ -34,7 +34,7 @@ interface Employee {
   id: string;
   name: string;
   role: string;
-  uid?: string; // Add this field
+  uid?: string;
 }
 
 interface CashCollection {
@@ -74,6 +74,15 @@ export default function CashCollection() {
     { symbol: "£", code: "GBP", name: "British Pound", flag: "🇬🇧" },
   ];
 
+  // Helper functions for user-centric structure
+  const getSalesCollection = (userId: string) => {
+    return collection(db, "users", userId, "sales");
+  };
+
+  const getEmployeesCollection = (userId: string) => {
+    return collection(db, "users", userId, "employees");
+  };
+
   const addDebug = (msg: string) => {
     console.log(msg);
     setDebug(prev => [...prev.slice(-9), `${new Date().toLocaleTimeString()}: ${msg}`]);
@@ -92,7 +101,7 @@ export default function CashCollection() {
         if (userDoc.exists()) {
           const data = userDoc.data();
           setOwnerId(user.uid);
-          addDebug(`👤 Owner logged in: ${data.name || 'Owner'}`);
+          addDebug(`👤 Owner logged in: ${data.username || data.name || 'Owner'}`);
           
           if (data.currency) {
             const savedCurrency = currencies.find(c => c.code === data.currency);
@@ -111,15 +120,15 @@ export default function CashCollection() {
     return () => unsub();
   }, []);
 
-  // Load today's sales
+  // ✅ UPDATED: Load today's sales from user-centric subcollection
   useEffect(() => {
     if (!ownerId || !activeBranch?.id) return;
 
     addDebug(`📊 Loading sales for branch: ${activeBranch.shopName}`);
 
+    const salesRef = getSalesCollection(ownerId);
     const q = query(
-      collection(db, "sales"),
-      where("ownerId", "==", ownerId),
+      salesRef,
       where("branchId", "==", activeBranch.id),
       orderBy("date", "desc"),
       limit(200)
@@ -179,15 +188,15 @@ export default function CashCollection() {
     return () => unsub();
   }, [ownerId, activeBranch?.id]);
 
-  // Load employees
+  // ✅ UPDATED: Load employees from user-centric subcollection
   useEffect(() => {
     if (!ownerId || !activeBranch?.id) return;
 
     addDebug(`👥 Loading employees for branch: ${activeBranch.shopName}`);
 
+    const employeesRef = getEmployeesCollection(ownerId);
     const q = query(
-      collection(db, "employees"),
-      where("ownerId", "==", ownerId),
+      employeesRef,
       where("branchId", "==", activeBranch.id)
     );
 
@@ -196,9 +205,9 @@ export default function CashCollection() {
         const data = d.data();
         return {
           id: d.id,
-          name: data.name || 'Unknown Employee',
+          name: data.name || data.username || 'Unknown Employee',
           role: data.role || 'employee',
-          uid: data.uid // Store the Firebase UID
+          uid: data.uid
         };
       });
       
@@ -213,10 +222,9 @@ export default function CashCollection() {
     return () => unsub();
   }, [ownerId, activeBranch?.id]);
 
-  // SIMPLIFIED cash collection calculation
+  // Cash collection calculation
   const cashCollections = useMemo(() => {
     const collections: CashCollection[] = [];
-    const unmatchedSales: Sale[] = [];
 
     addDebug("🔄 Calculating cash per person...");
 
@@ -230,12 +238,12 @@ export default function CashCollection() {
       saleCount: ownerSales.length,
       sales: ownerSales
     });
-    addDebug(`👑 Owner: ₨${ownerTotal} from ${ownerSales.length} sales`);
+    addDebug(`👑 Owner: ${currency.symbol}${ownerTotal} from ${ownerSales.length} sales`);
 
-    // 2. SIMPLE employee matching - just by role
+    // 2. Employee sales grouped by name
     const employeeSales = todaySales.filter(s => s.role === 'employee');
     
-    // Group by employee name (simple approach)
+    // Group by employee name
     const employeeGroups: { [key: string]: Sale[] } = {};
     
     employeeSales.forEach(sale => {
@@ -256,17 +264,16 @@ export default function CashCollection() {
         saleCount: sales.length,
         sales: sales
       });
-      addDebug(`👤 ${name}: ₨${total} from ${sales.length} sales`);
+      addDebug(`👤 ${name}: ${currency.symbol}${total} from ${sales.length} sales`);
     });
 
-    // Log any sales that might be unmatched
     if (employeeSales.length > 0) {
-      addDebug(`📊 Total employee sales: ₨${employeeSales.reduce((sum, s) => sum + s.totalAmount, 0)}`);
+      addDebug(`📊 Total employee sales: ${currency.symbol}${employeeSales.reduce((sum, s) => sum + s.totalAmount, 0)}`);
     }
 
     // Sort by total cash
     return collections.sort((a, b) => b.totalCash - a.totalCash);
-  }, [todaySales]);
+  }, [todaySales, currency.symbol]);
 
   const totalShopCash = useMemo(() => {
     return cashCollections.reduce((sum, c) => sum + c.totalCash, 0);

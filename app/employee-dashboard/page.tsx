@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { auth, db } from "@/lib/firebase";
-import { onAuthStateChanged } from "firebase/auth";
+import { onAuthStateChanged, signOut } from "firebase/auth";
 import {
   collection,
   query,
@@ -14,10 +14,12 @@ import {
   doc,
   increment,
   writeBatch,
-  limit
+  limit,
+  getDoc
 } from "firebase/firestore";
 import Image from "next/image";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 
 // Debug mode - set to false in production
 const DEBUG = false;
@@ -32,6 +34,7 @@ interface Product {
   purchaseRate: number;
   allowSale: boolean;
   category: string;
+  branchId: string;
 }
 
 interface CartItem {
@@ -65,6 +68,7 @@ interface OfflineSale {
 }
 
 export default function EmployeeDashboard() {
+  const router = useRouter();
   const [employeeName, setEmployeeName] = useState("");
   const [employeeId, setEmployeeId] = useState("");
   const [ownerId, setOwnerId] = useState("");
@@ -89,6 +93,20 @@ export default function EmployeeDashboard() {
 
   // Refs
   const syncInProgress = useRef(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Helper functions for user-centric structure
+  const getProductsCollection = (userId: string) => {
+    return collection(db, "users", userId, "products");
+  };
+
+  const getProductDoc = (userId: string, productId: string) => {
+    return doc(db, "users", userId, "products", productId);
+  };
+
+  const getSalesCollection = (userId: string) => {
+    return collection(db, "users", userId, "sales");
+  };
 
   // Show toast notification
   const showNotification = useCallback((title: string, message: string, type: "success" | "error" | "info" = "success") => {
@@ -97,6 +115,18 @@ export default function EmployeeDashboard() {
     setTimeout(() => setShowToast(false), 3000);
   }, []);
 
+  // Handle sign out
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+      showNotification("Signed Out", "You have been signed out successfully", "success");
+      router.push("/login");
+    } catch (error) {
+      console.error("Sign out error:", error);
+      showNotification("Error", "Failed to sign out", "error");
+    }
+  };
+
   // Debounce search input
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -104,6 +134,18 @@ export default function EmployeeDashboard() {
     }, 300);
     return () => clearTimeout(timer);
   }, [searchTerm]);
+
+  // Focus search input on Ctrl+K or Cmd+K
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   // Detect offline / online
   useEffect(() => {
@@ -148,7 +190,17 @@ export default function EmployeeDashboard() {
               saleData.date = serverTimestamp() as any;
               saleData.createdAt = serverTimestamp() as any;
               
-              await addDoc(collection(db, "sales"), saleData);
+              const salesRef = getSalesCollection(ownerId);
+              await addDoc(salesRef, saleData);
+              
+              const batch = writeBatch(db);
+              for (const item of sale.items) {
+                const productRef = getProductDoc(ownerId, item.id);
+                batch.update(productRef, {
+                  qty: increment(-item.qty)
+                });
+              }
+              await batch.commit();
             } catch (err) {
               if (DEBUG) console.error("Error syncing offline sale:", err);
             }
@@ -157,7 +209,6 @@ export default function EmployeeDashboard() {
           localStorage.removeItem("employee_offline_sales");
           showNotification("Sync Complete", "All offline sales have been synced", "success");
           
-          // Refresh products after sync
           await loadProducts();
         } catch (err) {
           if (DEBUG) console.error("Error in sync process:", err);
@@ -170,13 +221,19 @@ export default function EmployeeDashboard() {
     syncOfflineSales();
   }, [isOffline, ownerId, branchId]);
 
-  // Load products function (reusable)
+  // Load products from user-centric subcollection based on branch
   const loadProducts = useCallback(async () => {
-    if (!branchId) return;
+    if (!branchId || !ownerId) {
+      if (DEBUG) console.log("Missing branchId or ownerId for loading products");
+      return;
+    }
     
     try {
+      if (DEBUG) console.log("Loading products for owner:", ownerId, "branch:", branchId);
+      
+      const productsRef = getProductsCollection(ownerId);
       const prodQuery = query(
-        collection(db, "products"),
+        productsRef,
         where("branchId", "==", branchId),
         where("allowSale", "==", true)
       );
@@ -193,67 +250,113 @@ export default function EmployeeDashboard() {
         purchaseRate: d.data().purchaseRate || 0,
         allowSale: d.data().allowSale,
         category: d.data().category || "",
+        branchId: d.data().branchId,
       })) as Product[];
 
+      if (DEBUG) console.log(`Loaded ${list.length} products for branch ${branchId}`);
       setProducts(list);
       
-      // Cache products
-      localStorage.setItem("employee_products_cache", JSON.stringify(list));
+      localStorage.setItem(`employee_products_cache_${branchId}`, JSON.stringify(list));
     } catch (error) {
       if (DEBUG) console.error("Error loading products:", error);
+      showNotification("Error", "Failed to load products", "error");
     }
-  }, [branchId]);
+  }, [branchId, ownerId, showNotification]);
 
-  // Detect employee login with cache
+  // Load employee data and products
   useEffect(() => {
-    // Load products from cache instantly
-    const cachedProducts = localStorage.getItem("employee_products_cache");
-    if (cachedProducts) {
-      try {
-        setProducts(JSON.parse(cachedProducts));
-      } catch (e) {
-        if (DEBUG) console.error("Error parsing products cache:", e);
+    const loadCachedProducts = () => {
+      const cachedBranchId = localStorage.getItem("employee_branch_id");
+      if (cachedBranchId) {
+        const cachedProducts = localStorage.getItem(`employee_products_cache_${cachedBranchId}`);
+        if (cachedProducts) {
+          try {
+            setProducts(JSON.parse(cachedProducts));
+            if (DEBUG) console.log("Loaded products from cache");
+          } catch (e) {
+            if (DEBUG) console.error("Error parsing products cache:", e);
+          }
+        }
       }
-    }
+    };
+    
+    loadCachedProducts();
 
     const unsub = onAuthStateChanged(auth, async (user) => {
-      if (!user) return;
+      if (!user) {
+        setIsLoading(false);
+        return;
+      }
 
       const uid = user.uid;
 
       try {
-        // Find employee document
-        const q = query(
-          collection(db, "employees"),
+        const usersRef = collection(db, "users");
+        const userQuery = query(usersRef, where("uid", "==", uid), limit(1));
+        const userSnap = await getDocs(userQuery);
+        
+        if (!userSnap.empty) {
+          const userData = userSnap.docs[0].data();
+          
+          if (userData.role === "employee") {
+            const foundOwnerId = userData.ownerId;
+            const foundBranchId = userData.branchId;
+            
+            setEmployeeName(userData.username || userData.name || "Employee");
+            setEmployeeId(uid);
+            setBranchId(foundBranchId);
+            setBranchName(userData.branchName || "");
+            setOwnerName(userData.ownerName || "");
+            setOwnerId(foundOwnerId);
+            
+            localStorage.setItem("employee_branch_id", foundBranchId);
+            localStorage.setItem("employee_owner_id", foundOwnerId);
+            
+            if (DEBUG) console.log("Employee data loaded from users collection");
+            
+            await loadProducts();
+            setIsLoading(false);
+            return;
+          }
+        }
+        
+        const empQuery = query(
+          collection(db, "allEmployees"),
           where("uid", "==", uid),
           limit(1)
         );
-
-        const snap = await getDocs(q);
-
-        if (!snap.empty) {
-          const emp = snap.docs[0].data();
+        
+        const empSnap = await getDocs(empQuery);
+        
+        if (!empSnap.empty) {
+          const emp = empSnap.docs[0].data();
           
-          setEmployeeData(emp);
-          setEmployeeName(emp.name);
+          setEmployeeName(emp.name || emp.username || "Employee");
           setEmployeeId(uid);
           setBranchId(emp.branchId);
-          setBranchName(emp.branchName);
+          setBranchName(emp.branchName || "");
           setOwnerName(emp.ownerName || "");
           setOwnerId(emp.ownerId || "");
           
-          // Load products
+          localStorage.setItem("employee_branch_id", emp.branchId);
+          localStorage.setItem("employee_owner_id", emp.ownerId || "");
+          
+          if (DEBUG) console.log("Employee data loaded from allEmployees collection");
           await loadProducts();
+        } else {
+          console.error("No employee data found for user:", uid);
+          showNotification("Error", "Employee profile not found. Please contact admin.", "error");
         }
       } catch (error) {
         if (DEBUG) console.error("Error loading employee data:", error);
+        showNotification("Error", "Failed to load employee data", "error");
       } finally {
         setIsLoading(false);
       }
     });
 
     return () => unsub();
-  }, [loadProducts]);
+  }, [loadProducts, showNotification]);
 
   // Get unique categories (memoized)
   const categories = useMemo(() => {
@@ -269,10 +372,17 @@ export default function EmployeeDashboard() {
     );
   }, [products, debouncedSearch, selectedCategory]);
 
-  // Add product to cart (memoized)
-  const addToCart = useCallback((product: Product) => {
+  // Add product to cart with quick quantity selection
+  const addToCart = useCallback((product: Product, customQty?: number) => {
     if (product.qty <= 0) {
       showNotification("Out of Stock", "Product is out of stock", "error");
+      return;
+    }
+
+    const quantity = customQty || 1;
+
+    if (quantity > product.qty) {
+      showNotification("Stock Limit", `Maximum available stock: ${product.qty} ${product.unit}`, "error");
       return;
     }
 
@@ -280,13 +390,14 @@ export default function EmployeeDashboard() {
       const exist = prev.find(p => p.id === product.id);
 
       if (exist) {
-        if (exist.qty >= product.qty) {
-          showNotification("Stock Limit", `Maximum available stock: ${product.qty}`, "error");
+        const newQty = exist.qty + quantity;
+        if (newQty > product.qty) {
+          showNotification("Stock Limit", `Maximum available stock: ${product.qty} ${product.unit}`, "error");
           return prev;
         }
-        showNotification("Cart Updated", `${product.name} quantity increased`, "success");
+        showNotification("Cart Updated", `${product.name} quantity increased by ${quantity}`, "success");
         return prev.map(p =>
-          p.id === product.id ? { ...p, qty: p.qty + 1 } : p
+          p.id === product.id ? { ...p, qty: newQty } : p
         );
       } else {
         showNotification("Item Added", `${product.name} added to cart`, "success");
@@ -294,7 +405,7 @@ export default function EmployeeDashboard() {
           id: product.id, 
           name: product.name, 
           price: product.saleRate, 
-          qty: 1,
+          qty: quantity,
           unit: product.unit,
           profit: product.profit,
           purchaseRate: product.purchaseRate
@@ -303,7 +414,13 @@ export default function EmployeeDashboard() {
     });
   }, [showNotification]);
 
-  // Update cart quantity (memoized)
+  // Quick add with +1 button
+  const quickAddToCart = useCallback((product: Product, e: React.MouseEvent) => {
+    e.stopPropagation();
+    addToCart(product, 1);
+  }, [addToCart]);
+
+  // Update cart quantity
   const updateCartQty = useCallback((productId: string, newQty: number) => {
     const product = products.find(p => p.id === productId);
     if (!product) return;
@@ -314,7 +431,7 @@ export default function EmployeeDashboard() {
     }
 
     if (newQty > product.qty) {
-      showNotification("Stock Limit", `Maximum available stock: ${product.qty}`, "error");
+      showNotification("Stock Limit", `Maximum available stock: ${product.qty} ${product.unit}`, "error");
       return;
     }
 
@@ -325,7 +442,7 @@ export default function EmployeeDashboard() {
     );
   }, [products, showNotification]);
 
-  // Remove from cart (memoized)
+  // Remove from cart
   const removeFromCart = useCallback((productId: string) => {
     const item = cart.find(c => c.id === productId);
     if (item) {
@@ -334,11 +451,19 @@ export default function EmployeeDashboard() {
     setCart(prev => prev.filter(item => item.id !== productId));
   }, [cart, showNotification]);
 
-  // Calculate totals with discount (memoized) - REMOVED PROFIT
+  // Clear cart
+  const clearCart = useCallback(() => {
+    if (cart.length > 0 && confirm("Are you sure you want to clear the cart?")) {
+      setCart([]);
+      setDiscount(0);
+      showNotification("Cart Cleared", "All items have been removed", "info");
+    }
+  }, [cart, showNotification]);
+
+  // Calculate totals with discount (memoized)
   const totals = useMemo(() => {
     const subtotal = cart.reduce((sum, item) => sum + item.price * item.qty, 0);
     
-    // Calculate discount amount
     let discountAmount = 0;
     if (discountType === "flat") {
       discountAmount = Math.min(discount, subtotal);
@@ -346,10 +471,7 @@ export default function EmployeeDashboard() {
       discountAmount = (subtotal * discount) / 100;
     }
     
-    // Ensure discount doesn't exceed subtotal
     discountAmount = Math.min(discountAmount, subtotal);
-    
-    // Calculate final amount
     const totalAmount = subtotal - discountAmount;
 
     return { 
@@ -359,28 +481,36 @@ export default function EmployeeDashboard() {
     };
   }, [cart, discount, discountType]);
 
-  // Complete sale with offline support and spinner
+  // Complete sale with offline support
   const completeSale = useCallback(async () => {
     if (cart.length === 0) {
       showNotification("Empty Cart", "Please add items to cart first", "error");
       return;
     }
 
+    if (!ownerId || !branchId) {
+      showNotification("Error", "Missing owner or branch information", "error");
+      return;
+    }
+
     setIsProcessing(true);
 
     try {
-      // Check stock availability again
       for (const item of cart) {
         const product = products.find(p => p.id === item.id);
-        if (!product || product.qty < item.qty) {
-          showNotification("Stock Error", `Insufficient stock for ${item.name}`, "error");
+        if (!product) {
+          showNotification("Stock Error", `Product ${item.name} not found`, "error");
+          setIsProcessing(false);
+          return;
+        }
+        if (product.qty < item.qty) {
+          showNotification("Stock Error", `Insufficient stock for ${item.name}. Available: ${product.qty} ${product.unit}`, "error");
           setIsProcessing(false);
           return;
         }
       }
 
-      // Calculate total profit for database (hidden from UI)
-      const totalProfit = cart.reduce((sum, item) => sum + item.profit * item.qty, 0);
+      const totalProfit = cart.reduce((sum, item) => sum + (item.profit || 0) * item.qty, 0);
       let discountAmount = 0;
       if (discountType === "flat") {
         discountAmount = Math.min(discount, totals.subtotal);
@@ -390,7 +520,6 @@ export default function EmployeeDashboard() {
       discountAmount = Math.min(discountAmount, totals.subtotal);
       const finalProfit = totalProfit - discountAmount;
 
-      // If offline, save to localStorage
       if (isOffline) {
         const offlineSalesJson = localStorage.getItem("employee_offline_sales");
         const offlineSales: OfflineSale[] = offlineSalesJson ? JSON.parse(offlineSalesJson) : [];
@@ -418,9 +547,8 @@ export default function EmployeeDashboard() {
         offlineSales.push(saleData);
         localStorage.setItem("employee_offline_sales", JSON.stringify(offlineSales));
 
-        showNotification("Saved Offline", "Sale saved. Will sync when online.", "info");
+        showNotification("Saved Offline", "Sale saved locally. Will sync when online.", "info");
         
-        // Clear cart and reset discount
         setCart([]);
         setDiscount(0);
         setDiscountType("flat");
@@ -428,19 +556,17 @@ export default function EmployeeDashboard() {
         return;
       }
 
-      // Online - use batch write for atomic operation
       const batch = writeBatch(db);
 
-      // Update product quantities using increment
       for (const item of cart) {
-        const productRef = doc(db, "products", item.id);
+        const productRef = getProductDoc(ownerId, item.id);
         batch.update(productRef, {
           qty: increment(-item.qty)
         });
       }
 
-      // Record sale
-      const saleRef = doc(collection(db, "sales"));
+      const salesRef = getSalesCollection(ownerId);
+      const saleRef = doc(salesRef);
       batch.set(saleRef, {
         ownerId,
         ownerName,
@@ -456,10 +582,10 @@ export default function EmployeeDashboard() {
           qty: item.qty,
           price: item.price,
           unit: item.unit,
-          profit: item.profit,
-          purchaseRate: item.purchaseRate,
+          profit: item.profit || 0,
+          purchaseRate: item.purchaseRate || 0,
           total: item.price * item.qty,
-          itemProfit: item.profit * item.qty
+          itemProfit: (item.profit || 0) * item.qty
         })),
         totalAmount: totals.totalAmount,
         totalProfit: finalProfit,
@@ -470,22 +596,19 @@ export default function EmployeeDashboard() {
         createdAt: serverTimestamp()
       });
 
-      // Commit all writes atomically
       await batch.commit();
 
       showNotification("Sale Completed!", `Total: ₨${formatCurrency(totals.totalAmount)}`, "success");
 
-      // Clear cart and reset discount
       setCart([]);
       setDiscount(0);
       setDiscountType("flat");
 
-      // Refresh products to show updated stock
       await loadProducts();
 
     } catch (error) {
       if (DEBUG) console.error("Error completing sale:", error);
-      showNotification("Error", "Failed to complete sale", "error");
+      showNotification("Error", "Failed to complete sale. Please try again.", "error");
     } finally {
       setIsProcessing(false);
     }
@@ -585,7 +708,7 @@ export default function EmployeeDashboard() {
                   alt="Stockaroo"
                   width={40}
                   height={40}
-                  className="w-10 h-10 sm:w-11 sm:h-11 object-contain rounded-xl shadow-lg group-hover:scale-110 transition-all duration-300"
+                  className="w-10 h-10 sm:w-11 sm:h-11 object-contain rounded-xl shadow-lg group:hover:scale-110 transition-all duration-300"
                   priority
                 />
               </Link>
@@ -594,12 +717,12 @@ export default function EmployeeDashboard() {
                   Employee Sales
                 </h1>
                 <p className="text-sm text-gray-300">
-                  {branchName || "Loading..."}
+                  {branchName || "Loading branch..."}
                 </p>
               </div>
             </div>
 
-            {/* Employee Info */}
+            {/* Employee Info & Actions */}
             <div className="flex items-center gap-3 w-full sm:w-auto justify-between sm:justify-end">
               <div className="flex items-center gap-2 bg-white/10 backdrop-blur-xl px-4 py-2 rounded-xl border border-white/20">
                 <div className="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center font-bold text-white">
@@ -607,14 +730,22 @@ export default function EmployeeDashboard() {
                 </div>
                 <div className="text-sm">
                   <div className="font-semibold">{employeeName || "Employee"}</div>
-                  <div className="text-xs text-gray-300">Selling for {ownerName}</div>
+                  <div className="text-xs text-gray-300">Selling for {ownerName || "Owner"}</div>
                 </div>
               </div>
 
+              {/* Sign Out Button */}
+              <button
+                onClick={handleSignOut}
+                className="bg-red-500/20 hover:bg-red-500/30 backdrop-blur-xl border border-red-500/30 text-white px-4 py-2 rounded-xl text-sm font-semibold transition-all flex items-center gap-2"
+              >
+                <span>🚪</span> Sign Out
+              </button>
+
               {/* Offline Badge */}
               {isOffline && (
-                <div className="bg-white/10 backdrop-blur-xl border border-white/30 text-white/90 text-sm px-4 py-2 rounded-xl font-semibold shadow-xl animate-pulse">
-                  📴 Offline
+                <div className="bg-yellow-500/20 backdrop-blur-xl border border-yellow-500/30 text-yellow-300 text-sm px-4 py-2 rounded-xl font-semibold shadow-xl animate-pulse">
+                  📴 Offline Mode
                 </div>
               )}
             </div>
@@ -629,17 +760,21 @@ export default function EmployeeDashboard() {
           {/* Products Section - 2 columns */}
           <div className="lg:col-span-2 space-y-6">
             <div className="bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border border-gray-200/60 p-6">
-              {/* Search */}
+              {/* Search with keyboard shortcut hint */}
               <div className="relative group mb-4">
                 <input
+                  ref={searchInputRef}
                   type="text"
-                  placeholder="Search products..."
+                  placeholder="Search products... (Ctrl+K)"
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
-                  className="w-full pl-12 pr-4 py-3 bg-white/90 backdrop-blur-xl border border-gray-200/60 hover:border-gray-300 focus:ring-4 focus:ring-gray-200/50 focus:border-gray-400 rounded-xl transition-all duration-300 outline-none placeholder-gray-500"
+                  className="w-full pl-12 pr-24 py-3 bg-white/90 backdrop-blur-xl border border-gray-200/60 hover:border-gray-300 focus:ring-4 focus:ring-gray-200/50 focus:border-gray-400 rounded-xl transition-all duration-300 outline-none placeholder-gray-500"
                 />
                 <div className="absolute left-4 top-1/2 -translate-y-1/2 text-xl text-gray-400">
                   🔍
+                </div>
+                <div className="absolute right-4 top-1/2 -translate-y-1/2 text-xs text-gray-400 bg-gray-100 px-2 py-1 rounded-md">
+                  ⌘K
                 </div>
               </div>
 
@@ -656,7 +791,7 @@ export default function EmployeeDashboard() {
                           : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
                       }`}
                     >
-                      {cat === "all" ? "All" : cat}
+                      {cat === "all" ? "All Products" : cat}
                     </button>
                   ))}
                 </div>
@@ -668,34 +803,45 @@ export default function EmployeeDashboard() {
                   <div className="col-span-2 text-center py-12">
                     <div className="text-6xl mb-4">📦</div>
                     <p className="text-gray-400 font-medium">No products available</p>
+                    <p className="text-xs text-gray-400 mt-2">Products will appear here once added by the owner</p>
                   </div>
                 ) : (
                   filteredProducts.map(product => (
-                    <button
+                    <div
                       key={product.id}
-                      onClick={() => addToCart(product)}
-                      disabled={product.qty === 0 || isProcessing}
-                      className={`p-4 rounded-xl border transition-all duration-300 text-left ${
+                      className={`p-4 rounded-xl border transition-all duration-300 ${
                         product.qty === 0 || isProcessing
                           ? 'bg-gray-100 border-gray-200 cursor-not-allowed opacity-50'
                           : 'bg-white hover:bg-gray-50 border-gray-200 hover:border-gray-900 hover:shadow-lg'
                       }`}
                     >
-                      <div className="font-semibold text-gray-900 mb-1">{product.name}</div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-lg font-bold text-gray-900">
-                          ₨{formatCurrency(product.saleRate)}
-                        </span>
-                        <span className="text-xs text-gray-500">
-                          Stock: {product.qty} {product.unit}
-                        </span>
-                      </div>
-                      {product.qty <= 5 && product.qty > 0 && (
-                        <div className="mt-2 text-xs text-orange-600 font-semibold">
-                          ⚠️ Only {product.qty} left
+                      <div 
+                        className="cursor-pointer"
+                        onClick={() => addToCart(product)}
+                      >
+                        <div className="font-semibold text-gray-900 mb-1">{product.name}</div>
+                        <div className="flex justify-between items-center">
+                          <span className="text-lg font-bold text-gray-900">
+                            ₨{formatCurrency(product.saleRate)}
+                          </span>
+                          <span className="text-xs text-gray-500">
+                            Stock: {product.qty} {product.unit}
+                          </span>
                         </div>
-                      )}
-                    </button>
+                        {product.qty <= 5 && product.qty > 0 && (
+                          <div className="mt-2 text-xs text-orange-600 font-semibold">
+                            ⚠️ Only {product.qty} {product.unit} left
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        onClick={(e) => quickAddToCart(product, e)}
+                        disabled={product.qty === 0 || isProcessing}
+                        className="mt-3 w-full bg-gray-900 hover:bg-gray-800 text-white py-2 rounded-lg text-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        + Add to Cart
+                      </button>
+                    </div>
                   ))
                 )}
               </div>
@@ -709,8 +855,17 @@ export default function EmployeeDashboard() {
                 <h2 className="text-xl font-bold text-gray-900">Current Sale</h2>
                 <div className="flex items-center gap-2">
                   <span className="bg-gray-900 text-white px-3 py-1 rounded-full text-sm font-semibold">
-                    {cart.length} items
+                    {cart.length} {cart.length === 1 ? 'item' : 'items'}
                   </span>
+                  {cart.length > 0 && (
+                    <button
+                      onClick={clearCart}
+                      disabled={isProcessing}
+                      className="text-red-500 hover:text-red-700 text-sm font-semibold transition-colors disabled:opacity-50"
+                    >
+                      Clear All
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -726,7 +881,7 @@ export default function EmployeeDashboard() {
                       disabled={isProcessing}
                     >
                       <option value="flat">Flat (₨)</option>
-                      <option value="percent">%</option>
+                      <option value="percent">Percentage (%)</option>
                     </select>
                     <input
                       type="number"
@@ -748,50 +903,52 @@ export default function EmployeeDashboard() {
                   <div className="text-center py-12">
                     <div className="text-6xl mb-4">🛒</div>
                     <p className="text-gray-400 font-medium">Cart is empty</p>
-                    <p className="text-xs text-gray-400 mt-2">Click products to add</p>
+                    <p className="text-xs text-gray-400 mt-2">Click on products to add</p>
                   </div>
                 ) : (
-                  cart.map(item => (
-                    <div key={item.id} className="bg-gray-50 p-3 rounded-xl border border-gray-200">
-                      <div className="flex justify-between items-start mb-2">
-                        <div>
-                          <div className="font-semibold text-gray-900">{item.name}</div>
-                          <div className="text-xs text-gray-500">For {ownerName}'s store</div>
-                        </div>
-                        <button
-                          onClick={() => removeFromCart(item.id)}
-                          disabled={isProcessing}
-                          className="text-red-500 hover:text-red-700 disabled:opacity-50"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                      
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
+                  cart.map(item => {
+                    const product = products.find(p => p.id === item.id);
+                    return (
+                      <div key={item.id} className="bg-gray-50 p-3 rounded-xl border border-gray-200">
+                        <div className="flex justify-between items-start mb-2">
+                          <div>
+                            <div className="font-semibold text-gray-900">{item.name}</div>
+                            <div className="text-xs text-gray-500">{item.unit}</div>
+                          </div>
                           <button
-                            onClick={() => updateCartQty(item.id, item.qty - 1)}
+                            onClick={() => removeFromCart(item.id)}
                             disabled={isProcessing}
-                            className="w-8 h-8 bg-gray-200 rounded-lg hover:bg-gray-300 flex items-center justify-center font-bold disabled:opacity-50"
+                            className="text-red-500 hover:text-red-700 disabled:opacity-50 transition-colors"
                           >
-                            -
+                            ✕
                           </button>
-                          <span className="font-semibold w-8 text-center">{item.qty}</span>
-                          <button
-                            onClick={() => updateCartQty(item.id, item.qty + 1)}
-                            disabled={isProcessing}
-                            className="w-8 h-8 bg-gray-200 rounded-lg hover:bg-gray-300 flex items-center justify-center font-bold disabled:opacity-50"
-                          >
-                            +
-                          </button>
-                          <span className="text-xs text-gray-500 ml-2">{item.unit}</span>
                         </div>
-                        <span className="font-bold text-gray-900">
-                          ₨{formatCurrency(item.price * item.qty)}
-                        </span>
+                        
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => updateCartQty(item.id, item.qty - 1)}
+                              disabled={isProcessing}
+                              className="w-8 h-8 bg-gray-200 rounded-lg hover:bg-gray-300 flex items-center justify-center font-bold disabled:opacity-50 transition-colors"
+                            >
+                              -
+                            </button>
+                            <span className="font-semibold w-8 text-center">{item.qty}</span>
+                            <button
+                              onClick={() => updateCartQty(item.id, item.qty + 1)}
+                              disabled={isProcessing || (product && item.qty >= product.qty)}
+                              className="w-8 h-8 bg-gray-200 rounded-lg hover:bg-gray-300 flex items-center justify-center font-bold disabled:opacity-50 transition-colors"
+                            >
+                              +
+                            </button>
+                          </div>
+                          <span className="font-bold text-gray-900">
+                            ₨{formatCurrency(item.price * item.qty)}
+                          </span>
+                        </div>
                       </div>
-                    </div>
-                  ))
+                    );
+                  })
                 )}
               </div>
 
@@ -817,19 +974,19 @@ export default function EmployeeDashboard() {
                   )}
                   
                   {/* Total Amount */}
-                  <div className="flex justify-between items-center mb-4">
-                    <span className="text-gray-600 font-semibold">Total Amount:</span>
+                  <div className="flex justify-between items-center mb-4 pt-2 border-t border-gray-200">
+                    <span className="text-gray-900 font-bold">Total Amount:</span>
                     <span className="text-2xl font-bold text-gray-900">
                       ₨{formatCurrency(totals.totalAmount)}
                     </span>
                   </div>
 
                   {/* Info Box */}
-                  <div className="bg-blue-50 p-3 rounded-xl mb-4">
-                    <p className="text-xs text-blue-800">
-                      <span className="font-semibold">Employee:</span> {employeeName}<br />
-                      <span className="font-semibold">Owner:</span> {ownerName}<br />
-                      <span className="font-semibold">Branch:</span> {branchName}
+                  <div className="bg-blue-50 p-3 rounded-xl mb-4 border border-blue-200">
+                    <p className="text-xs text-blue-800 space-y-1">
+                      <div><span className="font-semibold">Employee:</span> {employeeName}</div>
+                      <div><span className="font-semibold">Owner:</span> {ownerName}</div>
+                      <div><span className="font-semibold">Branch:</span> {branchName}</div>
                     </p>
                   </div>
 

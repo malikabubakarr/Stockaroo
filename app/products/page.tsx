@@ -10,7 +10,6 @@ import {
   deleteDoc,
   query,
   where,
-  onSnapshot,
   orderBy,
   serverTimestamp,
   getDoc,
@@ -25,7 +24,6 @@ import {
   setDoc,
 } from "firebase/firestore";
 import { onAuthStateChanged } from "firebase/auth";
-import { useBranch } from "@/context/BranchContext";
 import * as XLSX from "xlsx";
 import Link from "next/link";
 import Image from "next/image";
@@ -57,6 +55,13 @@ interface CurrencyOption {
   flag: string;
 }
 
+interface Branch {
+  id: string;
+  shopName: string;
+  isActive: boolean;
+  isMain: boolean;
+}
+
 interface AppState {
   products: Product[];
   selectedProduct: Product | null;
@@ -67,7 +72,6 @@ interface AppState {
   hasMore: boolean;
   loadingMore: boolean;
   lastDoc: QueryDocumentSnapshot<DocumentData> | null;
-  initialLoadDone: boolean;
   name: string;
   category: string;
   unit: string;
@@ -79,22 +83,26 @@ interface AppState {
   barcode: string;
   searchTerm: string;
   toast: { message: string; type: string } | null;
+  branches: Branch[];
+  selectedBranchId: string | null;
 }
 
 type AppAction =
   | { type: 'SET_PRODUCTS'; payload: Product[] }
   | { type: 'SET_SELECTED_PRODUCT'; payload: Product | null }
   | { type: 'SET_LOADING'; payload: boolean }
+  | { type: 'SET_SUBMITTING'; payload: boolean }
   | { type: 'SET_LOADING_MORE'; payload: boolean }
   | { type: 'SET_LAST_DOC'; payload: QueryDocumentSnapshot<DocumentData> | null }
   | { type: 'SET_HAS_MORE'; payload: boolean }
-  | { type: 'SET_INITIAL_LOAD_DONE'; payload: boolean }
   | { type: 'SET_FORM_FIELD'; payload: { field: keyof Pick<AppState, 'name'|'category'|'unit'|'qty'|'minStock'|'purchase'|'sale'|'barcode'|'allowSale'>; value: any } }
   | { type: 'RESET_FORM' }
   | { type: 'SET_SEARCH_TERM'; payload: string }
   | { type: 'SET_TOAST'; payload: { message: string; type: string } | null }
   | { type: 'SET_OFFLINE'; payload: boolean }
-  | { type: 'SET_OWNER_NAME'; payload: string };
+  | { type: 'SET_OWNER_NAME'; payload: string }
+  | { type: 'SET_BRANCHES'; payload: Branch[] }
+  | { type: 'SET_SELECTED_BRANCH'; payload: string | null };
 
 const appReducer = (state: AppState, action: AppAction): AppState => {
   switch (action.type) {
@@ -104,14 +112,14 @@ const appReducer = (state: AppState, action: AppAction): AppState => {
       return { ...state, selectedProduct: action.payload };
     case 'SET_LOADING':
       return { ...state, loading: action.payload };
+    case 'SET_SUBMITTING':
+      return { ...state, isSubmitting: action.payload };
     case 'SET_LOADING_MORE':
       return { ...state, loadingMore: action.payload };
     case 'SET_LAST_DOC':
       return { ...state, lastDoc: action.payload };
     case 'SET_HAS_MORE':
       return { ...state, hasMore: action.payload };
-    case 'SET_INITIAL_LOAD_DONE':
-      return { ...state, initialLoadDone: action.payload };
     case 'SET_FORM_FIELD':
       return { ...state, [action.payload.field]: action.payload.value };
     case 'RESET_FORM':
@@ -136,14 +144,18 @@ const appReducer = (state: AppState, action: AppAction): AppState => {
       return { ...state, isOffline: action.payload };
     case 'SET_OWNER_NAME':
       return { ...state, ownerName: action.payload };
+    case 'SET_BRANCHES':
+      return { ...state, branches: action.payload };
+    case 'SET_SELECTED_BRANCH':
+      return { ...state, selectedBranchId: action.payload, products: [], lastDoc: null, hasMore: true };
     default:
       return state;
   }
 };
 
-// ✅ FIXED: Proper debounce with cleanup
+// Debounce hook with fixed type
 function useDebounce<T extends (...args: any[]) => any>(func: T, wait: number): T {
-  const timeoutRef = useRef<NodeJS.Timeout>();
+  const timeoutRef = useRef<ReturnType<typeof setTimeout>>();
   
   const debounced = useCallback((...args: Parameters<T>) => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
@@ -156,22 +168,20 @@ function useDebounce<T extends (...args: any[]) => any>(func: T, wait: number): 
     };
   }, []);
 
-  return debounced as T;
+  return debounced;
 }
 
-const CACHE_KEY = "products_cache_v2";
 const PAGE_SIZE = 50;
 const BATCH_SIZE = 400;
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
 
 export default function Products() {
-  const { activeBranch } = useBranch();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const observerTarget = useRef<HTMLDivElement>(null);
   const observerRef = useRef<IntersectionObserver | null>(null);
-  const unsubscribeRef = useRef<(() => void) | null>(null);
+  const requestIdRef = useRef(0);
+  const isLoadingProductsRef = useRef(false);
 
-  // ✅ FIXED: Single source of truth with reducer
   const [state, dispatch] = useReducer(appReducer, {
     products: [],
     selectedProduct: null,
@@ -182,7 +192,6 @@ export default function Products() {
     hasMore: true,
     loadingMore: false,
     lastDoc: null,
-    initialLoadDone: false,
     name: "",
     category: "",
     unit: "pcs",
@@ -194,11 +203,13 @@ export default function Products() {
     barcode: "",
     searchTerm: "",
     toast: null,
+    branches: [],
+    selectedBranchId: null,
   });
 
   const [authUser, setAuthUser] = useState<any>(null);
   const [currency, setCurrency] = useState<CurrencyOption>({
-    symbol: "$", code: "USD", name: "US Dollar", flag: "🇺🇸"
+    symbol: "₨", code: "PKR", name: "Pakistani Rupee", flag: "🇵🇰"
   });
 
   const currencies: CurrencyOption[] = [
@@ -206,15 +217,28 @@ export default function Products() {
     { symbol: "$", code: "USD", name: "US Dollar", flag: "🇺🇸" },
     { symbol: "€", code: "EUR", name: "Euro", flag: "🇪🇺" },
     { symbol: "£", code: "GBP", name: "British Pound", flag: "🇬🇧" },
-    { symbol: "¥", code: "JPY", name: "Japanese Yen", flag: "🇯🇵" },
-    { symbol: "₩", code: "KRW", name: "South Korean Won", flag: "🇰🇷" },
-    { symbol: "₱", code: "PHP", name: "Philippine Peso", flag: "🇵🇭" },
-    { symbol: "₦", code: "NGN", name: "Nigerian Naira", flag: "🇳🇬" },
-    { symbol: "₪", code: "ILS", name: "Israeli Shekel", flag: "🇮🇱" },
-    { symbol: "₫", code: "VND", name: "Vietnamese Dong", flag: "🇻🇳" },
   ];
 
-  // ✅ FIXED: Memoized derived state
+  // ============================================
+  // HELPER FUNCTIONS - USER SUBCOLLECTION
+  // ============================================
+  const getUserProductsRef = useCallback((userId: string) => {
+    return collection(db, "users", userId, "products");
+  }, []);
+
+  const getUserProductDoc = useCallback((userId: string, productId: string) => {
+    return doc(db, "users", userId, "products", productId);
+  }, []);
+
+  const getUserBarcodeDoc = useCallback((userId: string, barcode: string) => {
+    return doc(db, "users", userId, "barcodes", barcode);
+  }, []);
+
+  const getUserBranchesRef = useCallback((userId: string) => {
+    return collection(db, "users", userId, "branches");
+  }, []);
+
+  // Filtered products based on search
   const filteredProducts = useMemo(() => {
     if (!state.searchTerm.trim()) return state.products;
     const searchLower = state.searchTerm.toLowerCase();
@@ -226,7 +250,6 @@ export default function Products() {
     });
   }, [state.products, state.searchTerm]);
 
-  // ✅ FIXED: Stable callbacks with proper deps
   const showToast = useCallback((message: string, type: string = "success") => {
     dispatch({ type: 'SET_TOAST', payload: { message, type } });
     setTimeout(() => dispatch({ type: 'SET_TOAST', payload: null }), 3000);
@@ -240,13 +263,15 @@ export default function Products() {
     dispatch({ type: 'SET_SEARCH_TERM', payload: value });
   }, 300);
 
-  // ✅ FIXED: Auth with proper cleanup
+  // Auth listener
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, setAuthUser);
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setAuthUser(user);
+    });
     return unsubscribe;
   }, []);
 
-  // ✅ FIXED: Online/offline with stable handler
+  // Online/offline status
   useEffect(() => {
     const handleStatus = () => {
       dispatch({ type: 'SET_OFFLINE', payload: !navigator.onLine });
@@ -260,12 +285,14 @@ export default function Products() {
     };
   }, []);
 
-  // ✅ FIXED: User data load
+  // Load user data and branches
   useEffect(() => {
     if (!authUser) return;
     
     const loadUserData = async () => {
       try {
+        dispatch({ type: 'SET_LOADING', payload: true });
+        
         const userDoc = await getDoc(doc(db, "users", authUser.uid));
         if (userDoc.exists()) {
           const userData = userDoc.data();
@@ -275,31 +302,82 @@ export default function Products() {
             if (savedCurrency) setCurrency(savedCurrency);
           }
         }
+
+        const branchesRef = getUserBranchesRef(authUser.uid);
+        const branchesSnap = await getDocs(branchesRef);
+        const branchesList: Branch[] = branchesSnap.docs.map(doc => ({
+          id: doc.id,
+          shopName: doc.data().shopName,
+          isActive: doc.data().isActive,
+          isMain: doc.data().isMain || false,
+        }));
+        
+        dispatch({ type: 'SET_BRANCHES', payload: branchesList });
+        
+        const mainBranch = branchesList.find(b => b.isMain === true && b.isActive !== false);
+        const defaultBranch = mainBranch || branchesList.find(b => b.isActive !== false);
+        if (defaultBranch && !state.selectedBranchId) {
+          dispatch({ type: 'SET_SELECTED_BRANCH', payload: defaultBranch.id });
+        }
+        
+        dispatch({ type: 'SET_LOADING', payload: false });
       } catch (error) {
         console.error("Error loading user data:", error);
+        dispatch({ type: 'SET_LOADING', payload: false });
+        showToast("Failed to load user data", "error");
       }
     };
     loadUserData();
-  }, [authUser, currencies]);
+  }, [authUser]); // Removed currencies and getUserBranchesRef to prevent re-runs
 
-  // ✅ FIXED: Proper pagination - NO real-time conflicts
+  // ============================================
+  // LOAD PRODUCTS - FIXED: Removed state.products from dependencies
+  // ============================================
   const loadProducts = useCallback(async (reset: boolean = true) => {
-    if (!activeBranch?.id || !authUser) return;
+    // Prevent concurrent loads
+    if (isLoadingProductsRef.current) {
+      console.log("⏭️ Skipping - already loading products");
+      return;
+    }
+    
+    const requestId = ++requestIdRef.current;
+    isLoadingProductsRef.current = true;
+    
+    console.log("🔍 loadProducts called:", { 
+      branchId: state.selectedBranchId, 
+      userId: authUser?.uid,
+      reset,
+      requestId
+    });
+    
+    if (!state.selectedBranchId || !authUser) {
+      console.log("❌ Cannot load: missing branch or user");
+      isLoadingProductsRef.current = false;
+      return;
+    }
     
     if (reset) {
+      dispatch({ type: 'SET_LOADING', payload: true });
       dispatch({ type: 'SET_PRODUCTS', payload: [] });
       dispatch({ type: 'SET_LAST_DOC', payload: null });
       dispatch({ type: 'SET_HAS_MORE', payload: true });
     }
     
-    if (!reset && (!state.hasMore || state.loadingMore)) return;
+    if (!reset && (!state.hasMore || state.loadingMore)) {
+      if (reset) dispatch({ type: 'SET_LOADING', payload: false });
+      isLoadingProductsRef.current = false;
+      return;
+    }
     
-    dispatch({ type: 'SET_LOADING_MORE', payload: true });
+    if (!reset) {
+      dispatch({ type: 'SET_LOADING_MORE', payload: true });
+    }
     
     try {
+      const productsRef = getUserProductsRef(authUser.uid);
+      
       const constraints: QueryConstraint[] = [
-        where("ownerId", "==", authUser.uid),
-        where("branchId", "==", activeBranch.id),
+        where("branchId", "==", state.selectedBranchId),
         orderBy("name", "asc"),
         limit(PAGE_SIZE)
       ];
@@ -308,69 +386,74 @@ export default function Products() {
         constraints.push(startAfter(state.lastDoc));
       }
       
-      const productsQuery = query(collection(db, "products"), ...constraints);
+      const productsQuery = query(productsRef, ...constraints);
       const snap = await getDocs(productsQuery);
+      
+      // Check if this response is still valid (race condition guard)
+      if (requestId !== requestIdRef.current) {
+        console.log("⚠️ Ignoring stale response", { requestId, current: requestIdRef.current });
+        isLoadingProductsRef.current = false;
+        return;
+      }
       
       const newProducts: Product[] = snap.docs.map((d) => ({
         id: d.id,
         ...(d.data() as Omit<Product, 'id'>)
       }));
       
-      dispatch({ type: 'SET_PRODUCTS', payload: reset ? newProducts : [...state.products, ...newProducts] });
+      console.log("✅ Products fetched:", newProducts.length);
+      
+      if (reset) {
+        dispatch({ type: 'SET_PRODUCTS', payload: newProducts });
+      } else {
+        dispatch({ type: 'SET_PRODUCTS', payload: [...state.products, ...newProducts] });
+      }
+      
       dispatch({ type: 'SET_LAST_DOC', payload: snap.docs[snap.docs.length - 1] || null });
       dispatch({ type: 'SET_HAS_MORE', payload: snap.docs.length === PAGE_SIZE });
-      dispatch({ type: 'SET_INITIAL_LOAD_DONE', payload: true });
-    } catch (error) {
-      console.error("Load products error:", error);
-      showToast("Failed to load products", "error");
+      
+    } catch (error: any) {
+      if (requestId !== requestIdRef.current) {
+        isLoadingProductsRef.current = false;
+        return;
+      }
+      
+      console.error("❌ Load products error:", error);
+      if (error.message?.includes("index")) {
+        showToast("Need to create database index. Check Firebase console.", "error");
+      } else {
+        showToast("Failed to load products", "error");
+      }
     } finally {
-      dispatch({ type: 'SET_LOADING_MORE', payload: false });
+      if (requestId === requestIdRef.current) {
+        dispatch({ type: 'SET_LOADING', payload: false });
+        dispatch({ type: 'SET_LOADING_MORE', payload: false });
+        isLoadingProductsRef.current = false;
+      }
     }
-  }, [activeBranch?.id, authUser, state.hasMore, state.loadingMore, state.lastDoc, state.products, showToast]);
+  }, [state.selectedBranchId, authUser, state.hasMore, state.loadingMore, state.lastDoc, getUserProductsRef, showToast]); // ✅ REMOVED state.products
 
-  // ✅ FIXED: Initial load - stable deps
+  // Load products when branch changes
   useEffect(() => {
-    if (activeBranch?.id && authUser && !state.initialLoadDone) {
+    if (state.selectedBranchId && authUser) {
+      console.log("🔄 Branch changed or user loaded, fetching products...");
       loadProducts(true);
     }
-  }, [activeBranch?.id, authUser, state.initialLoadDone, loadProducts]);
+  }, [state.selectedBranchId, authUser]); // ✅ REMOVED loadProducts from dependencies
 
-  // ✅ FIXED: SINGLE real-time listener for FIRST PAGE ONLY
+  // Infinite scroll observer with proper cleanup
   useEffect(() => {
-    if (!activeBranch?.id || !authUser || state.initialLoadDone) return;
+    if (!observerTarget.current || !state.hasMore || state.loadingMore || state.loading) return;
 
-    // Listen ONLY to first page to avoid pagination conflicts
-    const productsQuery = query(
-      collection(db, "products"),
-      where("ownerId", "==", authUser.uid),
-      where("branchId", "==", activeBranch.id),
-      orderBy("name", "asc"),
-      limit(PAGE_SIZE)
-    );
-
-    const unsubscribe = onSnapshot(productsQuery, (snap) => {
-      const updatedProducts: Product[] = snap.docs.map((d) => ({
-        id: d.id,
-        ...(d.data() as Omit<Product, 'id'>)
-      }));
-      dispatch({ type: 'SET_PRODUCTS', payload: updatedProducts });
-    });
-
-    unsubscribeRef.current = unsubscribe;
-
-    return () => {
-      unsubscribeRef.current?.();
-      unsubscribeRef.current = null;
-    };
-  }, [activeBranch?.id, authUser, state.initialLoadDone]);
-
-  // ✅ FIXED: Debounced infinite scroll observer
-  useEffect(() => {
-    if (!observerTarget.current || !state.hasMore || state.loadingMore) return;
+    if (observerRef.current) {
+      observerRef.current.disconnect();
+      observerRef.current = null;
+    }
 
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (entry.isIntersecting && state.hasMore && !state.loadingMore) {
+        if (entry.isIntersecting && state.hasMore && !state.loadingMore && !state.loading) {
+          console.log("📜 Loading more products...");
           loadProducts(false);
         }
       },
@@ -381,51 +464,57 @@ export default function Products() {
     observerRef.current = observer;
 
     return () => {
-      observerRef.current?.disconnect();
-      observerRef.current = null;
+      if (observerRef.current) {
+        observerRef.current.disconnect();
+        observerRef.current = null;
+      }
     };
-  }, [state.hasMore, state.loadingMore, loadProducts]);
+  }, [state.hasMore, state.loadingMore, state.loading, loadProducts]);
 
-  // ✅ FIXED: Stable product operations
+  // Create product with unique barcode
   const createProductWithUniqueBarcode = useCallback(async (productData: any) => {
     const user = authUser;
-    if (!user || !activeBranch?.id) throw new Error("Missing user or branch");
+    if (!user || !state.selectedBranchId) throw new Error("Missing user or branch");
 
     const barcodeValue = productData.barcode;
     if (!barcodeValue) {
-      return await addDoc(collection(db, "products"), productData);
+      const productsRef = getUserProductsRef(user.uid);
+      return await addDoc(productsRef, productData);
     }
 
     const cleanBar = cleanBarcode(barcodeValue);
     if (!cleanBar) {
-      return await addDoc(collection(db, "products"), productData);
+      const productsRef = getUserProductsRef(user.uid);
+      return await addDoc(productsRef, productData);
     }
 
     let productId = "";
     
     await runTransaction(db, async (tx) => {
-      const barcodeRef = doc(db, "barcodes", cleanBar);
+      const barcodeRef = getUserBarcodeDoc(user.uid, cleanBar);
       const barcodeSnap = await tx.get(barcodeRef);
 
       if (barcodeSnap.exists()) {
         throw new Error(`Barcode ${cleanBar} already exists`);
       }
 
-      const productRef = doc(collection(db, "products"));
+      const productsRef = getUserProductsRef(user.uid);
+      const productRef = doc(productsRef);
       productId = productRef.id;
       
       tx.set(productRef, { ...productData, barcode: cleanBar, id: productId });
       tx.set(barcodeRef, { 
         productId, 
-        branchId: activeBranch.id,
+        branchId: state.selectedBranchId,
         ownerId: user.uid,
         createdAt: serverTimestamp()
       });
     });
     
     return { id: productId };
-  }, [authUser, activeBranch?.id, cleanBarcode]);
+  }, [authUser, state.selectedBranchId, cleanBarcode, getUserProductsRef, getUserBarcodeDoc]);
 
+  // Import products from Excel with chunking and duplicate check
   const handleImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -449,51 +538,80 @@ export default function Products() {
       }
 
       const user = authUser;
-      if (!user || !activeBranch?.id) {
-        showToast("Select branch first", "error");
+      if (!user || !state.selectedBranchId) {
+        showToast("Please select a branch first", "error");
         return;
       }
 
-      const batch = writeBatch(db);
       let successCount = 0;
       let errorCount = 0;
+      const productsRef = getUserProductsRef(user.uid);
+      const maxRows = Math.min(json.length, 1000);
 
-      for (const row of json.slice(0, 1000)) {
-        const purchaseRate = Number(row.purchaseRate) || 0;
-        const saleRate = Number(row.saleRate) || 0;
+      for (let i = 0; i < maxRows; i += BATCH_SIZE) {
+        const batch = writeBatch(db);
+        const chunk = json.slice(i, Math.min(i + BATCH_SIZE, maxRows));
         
-        if (!row.name || row.name.trim() === "") {
-          errorCount++;
-          continue;
+        for (const row of chunk) {
+          const purchaseRate = Number(row.purchaseRate) || 0;
+          const saleRate = Number(row.saleRate) || 0;
+          
+          if (!row.name || row.name.trim() === "") {
+            errorCount++;
+            continue;
+          }
+          
+          if (saleRate < purchaseRate) {
+            errorCount++;
+            continue;
+          }
+
+          const cleanBar = row.barcode ? cleanBarcode(String(row.barcode)) : "";
+          
+          if (cleanBar) {
+            const barcodeRef = getUserBarcodeDoc(user.uid, cleanBar);
+            const barcodeSnap = await getDoc(barcodeRef);
+            if (barcodeSnap.exists()) {
+              errorCount++;
+              continue;
+            }
+          }
+
+          const ref = doc(productsRef);
+          batch.set(ref, {
+            name: row.name.trim(),
+            category: row.category || "",
+            unit: row.unit || "pcs",
+            qty: Number(row.qty) || 0,
+            minStock: Number(row.minStock) || 0,
+            purchaseRate,
+            originalPurchaseRate: purchaseRate,
+            saleRate,
+            originalSaleRate: saleRate,
+            profit: saleRate - purchaseRate,
+            allowSale: true,
+            branchId: state.selectedBranchId,
+            ownerId: user.uid,
+            createdAt: serverTimestamp(),
+            barcode: cleanBar,
+          });
+          
+          if (cleanBar) {
+            const barcodeMappingRef = getUserBarcodeDoc(user.uid, cleanBar);
+            batch.set(barcodeMappingRef, {
+              productId: ref.id,
+              branchId: state.selectedBranchId,
+              ownerId: user.uid,
+              createdAt: serverTimestamp()
+            });
+          }
+          
+          successCount++;
         }
         
-        if (saleRate < purchaseRate) {
-          errorCount++;
-          continue;
-        }
-
-        const ref = doc(collection(db, "products"));
-        batch.set(ref, {
-          name: row.name.trim(),
-          category: row.category || "",
-          unit: row.unit || "pcs",
-          qty: Number(row.qty) || 0,
-          minStock: Number(row.minStock) || 0,
-          purchaseRate,
-          originalPurchaseRate: purchaseRate,
-          saleRate,
-          originalSaleRate: saleRate,
-          profit: saleRate - purchaseRate,
-          allowSale: true,
-          branchId: activeBranch.id,
-          ownerId: user.uid,
-          createdAt: serverTimestamp(),
-          barcode: row.barcode ? cleanBarcode(String(row.barcode)) : "",
-        });
-        successCount++;
+        await batch.commit();
       }
 
-      await batch.commit();
       showToast(`Imported ${successCount} products (${errorCount} skipped)`, "success");
       loadProducts(true);
     } catch (error) {
@@ -503,11 +621,12 @@ export default function Products() {
       dispatch({ type: 'SET_LOADING', payload: false });
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
-  }, [authUser, activeBranch?.id, cleanBarcode, showToast, loadProducts]);
+  }, [authUser, state.selectedBranchId, cleanBarcode, showToast, loadProducts, getUserProductsRef, getUserBarcodeDoc]);
 
-    const deleteAllProducts = useCallback(async () => {
+  // Delete all products
+  const deleteAllProducts = useCallback(async () => {
     const user = authUser;
-    if (!user || !activeBranch?.id) {
+    if (!user || !state.selectedBranchId) {
       showToast("Please select a branch first", "error");
       return;
     }
@@ -518,11 +637,11 @@ export default function Products() {
     try {
       let lastSnapshot: QueryDocumentSnapshot<DocumentData> | null = null;
       let totalDeleted = 0;
+      const productsRef = getUserProductsRef(user.uid);
 
       while (true) {
         const constraints: QueryConstraint[] = [
-          where("ownerId", "==", user.uid),
-          where("branchId", "==", activeBranch.id),
+          where("branchId", "==", state.selectedBranchId),
           orderBy("name"),
           limit(BATCH_SIZE)
         ];
@@ -531,7 +650,7 @@ export default function Products() {
           constraints.push(startAfter(lastSnapshot));
         }
         
-        const q = query(collection(db, "products"), ...constraints);
+        const q = query(productsRef, ...constraints);
         const snap = await getDocs(q);
         
         if (snap.empty) break;
@@ -540,7 +659,7 @@ export default function Products() {
         snap.docs.forEach((docSnap) => {
           const barcode = docSnap.data().barcode;
           if (barcode) {
-            batch.delete(doc(db, "barcodes", cleanBarcode(String(barcode))));
+            batch.delete(getUserBarcodeDoc(user.uid, cleanBarcode(String(barcode))));
           }
           batch.delete(docSnap.ref);
         });
@@ -560,7 +679,7 @@ export default function Products() {
     } finally {
       dispatch({ type: 'SET_LOADING', payload: false });
     }
-  }, [authUser, activeBranch?.id, cleanBarcode, showToast, loadProducts]);
+  }, [authUser, state.selectedBranchId, cleanBarcode, showToast, loadProducts, getUserProductsRef, getUserBarcodeDoc]);
 
   const resetForm = useCallback(() => {
     dispatch({ type: 'RESET_FORM' });
@@ -586,7 +705,7 @@ export default function Products() {
   }, [state.products, resetForm]);
 
   const validateProduct = useCallback((): boolean => {
-    if (!authUser || !activeBranch?.id) {
+    if (!authUser || !state.selectedBranchId) {
       showToast("Please select a branch first", "error");
       return false;
     }
@@ -627,14 +746,15 @@ export default function Products() {
     }
     
     return true;
-  }, [authUser, activeBranch?.id, state.name, state.qty, state.minStock, state.purchase, state.sale, showToast]);
+  }, [authUser, state.selectedBranchId, state.name, state.qty, state.minStock, state.purchase, state.sale, showToast]);
 
+  // Add or update product with proper submitting state
   const addOrUpdateProduct = useCallback(async () => {
     if (state.isSubmitting || state.loading) return;
     if (!validateProduct()) return;
     
     dispatch({ type: 'SET_LOADING', payload: true });
-    dispatch({ type: 'SET_FORM_FIELD', payload: { field: 'isSubmitting' as any, value: true } });
+    dispatch({ type: 'SET_SUBMITTING', payload: true });
 
     try {
       const user = authUser!;
@@ -655,30 +775,33 @@ export default function Products() {
         profit: saleRate - purchaseRate,
         allowSale: state.allowSale,
         ownerId: user.uid,
-        branchId: activeBranch!.id,
+        branchId: state.selectedBranchId,
         barcode: cleanedBarcode,
         updatedAt: serverTimestamp()
       };
 
       if (state.selectedProduct) {
         if (cleanedBarcode && cleanedBarcode !== state.selectedProduct.barcode) {
-          const barcodeRef = doc(db, "barcodes", cleanedBarcode);
+          const barcodeRef = getUserBarcodeDoc(user.uid, cleanedBarcode);
           const barcodeSnap = await getDoc(barcodeRef);
           if (barcodeSnap.exists()) {
             throw new Error("Barcode already exists");
           }
           
           if (state.selectedProduct.barcode) {
-            await deleteDoc(doc(db, "barcodes", cleanBarcode(state.selectedProduct.barcode)));
+            await deleteDoc(getUserBarcodeDoc(user.uid, cleanBarcode(state.selectedProduct.barcode)));
           }
-          await updateDoc(doc(db, "products", state.selectedProduct.id), productData);
+          
+          const productRef = getUserProductDoc(user.uid, state.selectedProduct.id);
+          await updateDoc(productRef, productData);
           await setDoc(barcodeRef, { 
             productId: state.selectedProduct.id, 
-            branchId: activeBranch!.id, 
+            branchId: state.selectedBranchId, 
             ownerId: user.uid 
           });
         } else {
-          await updateDoc(doc(db, "products", state.selectedProduct.id), productData);
+          const productRef = getUserProductDoc(user.uid, state.selectedProduct.id);
+          await updateDoc(productRef, productData);
         }
         showToast("Product updated", "success");
       } else {
@@ -692,15 +815,17 @@ export default function Products() {
       showToast(error.message || "Error saving product", "error");
     } finally {
       dispatch({ type: 'SET_LOADING', payload: false });
-      dispatch({ type: 'SET_FORM_FIELD', payload: { field: 'isSubmitting' as any, value: false } });
+      dispatch({ type: 'SET_SUBMITTING', payload: false });
     }
   }, [
     state.isSubmitting, state.loading, state.name, state.category, state.unit, state.qty, 
     state.minStock, state.purchase, state.sale, state.allowSale, state.barcode, 
-    state.selectedProduct, authUser, activeBranch, cleanBarcode, createProductWithUniqueBarcode, 
-    validateProduct, showToast, resetForm, loadProducts
+    state.selectedProduct, state.selectedBranchId, authUser, cleanBarcode, 
+    createProductWithUniqueBarcode, validateProduct, showToast, resetForm, loadProducts,
+    getUserProductDoc, getUserBarcodeDoc
   ]);
 
+  // Delete single product
   const deleteProduct = useCallback(async () => {
     if (!state.selectedProduct) return;
     if (!confirm(`Delete "${state.selectedProduct.name}"?`)) return;
@@ -710,14 +835,11 @@ export default function Products() {
       const user = authUser;
       if (!user) throw new Error("Not authenticated");
       
-      if (state.selectedProduct.ownerId !== user.uid || state.selectedProduct.branchId !== activeBranch?.id) {
-        throw new Error("Unauthorized");
-      }
-      
       if (state.selectedProduct.barcode) {
-        await deleteDoc(doc(db, "barcodes", cleanBarcode(state.selectedProduct.barcode)));
+        await deleteDoc(getUserBarcodeDoc(user.uid, cleanBarcode(state.selectedProduct.barcode)));
       }
-      await deleteDoc(doc(db, "products", state.selectedProduct.id));
+      const productRef = getUserProductDoc(user.uid, state.selectedProduct.id);
+      await deleteDoc(productRef);
       
       showToast("Product deleted", "success");
       resetForm();
@@ -727,43 +849,7 @@ export default function Products() {
     } finally {
       dispatch({ type: 'SET_LOADING', payload: false });
     }
-  }, [state.selectedProduct, authUser, activeBranch?.id, cleanBarcode, showToast, resetForm, loadProducts]);
-
-  const updateQuantity = useCallback(async (productId: string, change: number) => {
-    const product = state.products.find(p => p.id === productId);
-    if (!product) return;
-    
-    const newQty = product.qty + change;
-    if (newQty < 0) {
-      showToast("Cannot reduce quantity below 0", "error");
-      return;
-    }
-
-    // ✅ FIXED: Stable optimistic update
-    dispatch({ type: 'SET_PRODUCTS', payload: state.products.map(p => 
-      p.id === productId ? { ...p, qty: newQty } : p
-    ) });
-    
-    try {
-      await runTransaction(db, async (tx) => {
-        const ref = doc(db, "products", productId);
-        const snap = await tx.get(ref);
-        if (!snap.exists()) throw new Error("Product not found");
-        
-        const currentQty = (snap.data() as Product).qty;
-        const finalNewQty = currentQty + change;
-        if (finalNewQty < 0) throw new Error("Negative quantity");
-        
-        tx.update(ref, { qty: finalNewQty, updatedAt: serverTimestamp() });
-      });
-      
-      showToast(`Quantity ${change > 0 ? '+' : ''}${change}`, "success");
-    } catch (error: any) {
-      showToast(error.message || "Error updating quantity", "error");
-      // Revert
-      dispatch({ type: 'SET_PRODUCTS', payload: state.products });
-    }
-  }, [state.products, showToast]);
+  }, [state.selectedProduct, authUser, cleanBarcode, showToast, resetForm, loadProducts, getUserProductDoc, getUserBarcodeDoc]);
 
   const getInitials = useCallback((name: string) => {
     return name.split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2);
@@ -776,7 +862,7 @@ export default function Products() {
     }).format(amount);
   }, []);
 
-  // ✅ FIXED: Stable keyboard shortcuts
+  // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
@@ -796,7 +882,6 @@ export default function Products() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [state.loading, state.isSubmitting, addOrUpdateProduct, resetForm]);
 
-  // ✅ FIXED: Memoized components
   const ProductCard = useCallback(({ product }: { product: Product }) => (
     <div 
       className="h-[140px] p-3 rounded-xl border bg-white hover:bg-gray-50 cursor-pointer transition-all group hover:shadow-md"
@@ -833,13 +918,25 @@ export default function Products() {
     </div>
   ), []);
 
-  // Cleanup on unmount
+  // Cleanup
   useEffect(() => {
     return () => {
-      observerRef.current?.disconnect();
-      unsubscribeRef.current?.();
+      if (observerRef.current) {
+        observerRef.current.disconnect();
+      }
     };
   }, []);
+
+  if (!authUser) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-4 border-blue-600 border-t-transparent mx-auto mb-4"></div>
+          <p className="text-gray-600">Please login to continue...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
@@ -866,10 +963,28 @@ export default function Products() {
               </Link>
               <div>
                 <h1 className="text-2xl font-bold bg-gradient-to-r from-white to-gray-200 bg-clip-text text-transparent">Products</h1>
-                <p className="text-sm text-gray-300">{activeBranch?.shopName || "Select Branch"}</p>
+                <p className="text-sm text-gray-300">Manage your inventory</p>
               </div>
             </div>
             <div className="flex items-center gap-3">
+              {state.branches.length > 0 && (
+                <select
+                  value={state.selectedBranchId || ""}
+                  onChange={(e) => {
+                    console.log("🔄 Branch changed to:", e.target.value);
+                    dispatch({ type: 'SET_SELECTED_BRANCH', payload: e.target.value });
+                  }}
+                  className="bg-white/10 border border-white/20 rounded-xl px-4 py-2 text-white text-sm focus:outline-none"
+                >
+                  <option value="" className="text-gray-900">Select Branch</option>
+                  {state.branches.map(branch => (
+                    <option key={branch.id} value={branch.id} className="text-gray-900">
+                      {branch.shopName}
+                    </option>
+                  ))}
+                </select>
+              )}
+
               <div className="bg-white/10 backdrop-blur-xl px-4 py-2 rounded-xl border border-white/20 text-sm">
                 <div className="font-semibold">{getInitials(state.ownerName)} {state.ownerName}</div>
                 <div className="text-xs text-gray-300">Owner</div>
@@ -890,6 +1005,8 @@ export default function Products() {
         <div className="mb-8">
           <div className="relative max-w-2xl mx-auto">
             <input
+              id="search"
+              name="search"
               placeholder="Search products, barcodes..."
               onChange={(e) => debouncedSearch(e.target.value)}
               className="w-full pl-14 pr-6 py-4 text-lg bg-white/90 backdrop-blur-xl border border-gray-200 hover:border-gray-300 focus:ring-4 focus:ring-gray-200/50 focus:border-gray-400 rounded-2xl shadow-xl transition-all outline-none"
@@ -912,45 +1029,55 @@ export default function Products() {
                 </span>
               </div>
 
-                           {/* Product Selector */}
               <select
+                id="productSelector"
+                name="productSelector"
                 value={state.selectedProduct?.id || ""}
                 onChange={(e) => selectProduct(e.target.value)}
                 className="w-full px-4 py-3 mb-6 bg-white border border-gray-200 focus:ring-2 focus:ring-gray-900/20 focus:border-gray-900 rounded-xl font-medium"
                 disabled={state.loading}
               >
-                <option value="">Search Product</option>
+                <option value="">Select or Search Product</option>
                 {filteredProducts.slice(0, 100).map(p => (
                   <option key={p.id} value={p.id}>{p.name} ({p.qty} {p.unit})</option>
                 ))}
               </select>
 
-              {/* Bulk Actions */}
               <div className="space-y-3 mb-6">
                 <button
                   onClick={deleteAllProducts}
-                  disabled={state.loading}
+                  disabled={state.loading || !state.selectedBranchId}
                   className="w-full bg-gradient-to-r from-red-500 to-orange-500 hover:from-red-600 text-white font-bold py-3 px-4 rounded-xl shadow-lg hover:shadow-xl transition-all disabled:opacity-50"
                 >
                   🗑️ Delete All Products
                 </button>
                 <button
                   onClick={() => loadProducts(true)}
-                  disabled={state.loading || state.loadingMore}
+                  disabled={state.loading || state.loadingMore || !state.selectedBranchId}
                   className="w-full bg-gray-900 hover:bg-gray-800 text-white font-bold py-3 px-4 rounded-xl shadow-lg hover:shadow-xl transition-all disabled:opacity-50"
                 >
                   🔄 Refresh List
                 </button>
               </div>
 
-              {/* Product List */}
               <div className="space-y-3 max-h-96 overflow-y-auto pr-2">
-                {!state.initialLoadDone && state.loading ? (
-                  Array(3).fill(0).map((_, i) => <SkeletonCard key={`skeleton-${i}`} />)
+                {state.loading && state.products.length === 0 ? (
+                  Array(6).fill(0).map((_, i) => <SkeletonCard key={`skeleton-${i}`} />)
                 ) : filteredProducts.length === 0 ? (
                   <div className="text-center py-12">
                     <div className="text-5xl mb-4 mx-auto">📦</div>
                     <p className="text-gray-500 font-medium">No products found</p>
+                    {!state.selectedBranchId && (
+                      <p className="text-sm text-gray-400 mt-2">Please select a branch first</p>
+                    )}
+                    {state.selectedBranchId && state.products.length === 0 && !state.loading && (
+                      <button 
+                        onClick={() => loadProducts(true)}
+                        className="mt-4 text-blue-500 underline"
+                      >
+                        Click to retry loading
+                      </button>
+                    )}
                   </div>
                 ) : (
                   filteredProducts.map((p) => <ProductCard key={p.id} product={p} />)
@@ -968,12 +1095,20 @@ export default function Products() {
               </h2>
               <button
                 onClick={() => fileInputRef.current?.click()}
-                disabled={state.loading}
+                disabled={state.loading || !state.selectedBranchId}
                 className="w-full bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 text-white font-bold py-4 px-6 rounded-xl shadow-lg hover:shadow-xl transition-all disabled:opacity-50"
               >
                 📁 Upload Excel File (Max 5MB)
               </button>
-              <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleImport} className="hidden" />
+              <input 
+                ref={fileInputRef} 
+                id="excelUpload"
+                name="excelUpload"
+                type="file" 
+                accept=".xlsx,.xls" 
+                onChange={handleImport} 
+                className="hidden" 
+              />
               <div className="mt-4 p-3 bg-white/60 rounded-xl border text-xs text-gray-600">
                 Columns: <code className="bg-emerald-100 px-1 py-px rounded font-mono">name, category, unit, qty, minStock, purchaseRate, saleRate, barcode</code>
               </div>
@@ -990,10 +1125,11 @@ export default function Products() {
             </h2>
 
             <div className="space-y-4">
-              {/* Form Field Updates */}
               <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">Barcode / SKU</label>
+                <label htmlFor="barcode" className="block text-sm font-semibold text-gray-700 mb-1">Barcode / SKU</label>
                 <input 
+                  id="barcode"
+                  name="barcode"
                   value={state.barcode} 
                   onChange={e => dispatch({ type: 'SET_FORM_FIELD', payload: { field: 'barcode', value: e.target.value } })} 
                   className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 outline-none" 
@@ -1004,8 +1140,10 @@ export default function Products() {
               </div>
 
               <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">Product Name *</label>
+                <label htmlFor="productName" className="block text-sm font-semibold text-gray-700 mb-1">Product Name *</label>
                 <input 
+                  id="productName"
+                  name="productName"
                   value={state.name} 
                   onChange={e => dispatch({ type: 'SET_FORM_FIELD', payload: { field: 'name', value: e.target.value } })} 
                   className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 outline-none" 
@@ -1015,8 +1153,10 @@ export default function Products() {
               </div>
 
               <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">Category</label>
+                <label htmlFor="category" className="block text-sm font-semibold text-gray-700 mb-1">Category</label>
                 <input 
+                  id="category"
+                  name="category"
                   value={state.category} 
                   onChange={e => dispatch({ type: 'SET_FORM_FIELD', payload: { field: 'category', value: e.target.value } })} 
                   className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 outline-none" 
@@ -1026,8 +1166,10 @@ export default function Products() {
               </div>
 
               <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">Unit</label>
+                <label htmlFor="unit" className="block text-sm font-semibold text-gray-700 mb-1">Unit</label>
                 <select 
+                  id="unit"
+                  name="unit"
                   value={state.unit} 
                   onChange={e => dispatch({ type: 'SET_FORM_FIELD', payload: { field: 'unit', value: e.target.value } })}
                   disabled={state.loading}
@@ -1046,8 +1188,10 @@ export default function Products() {
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-1">Quantity</label>
+                  <label htmlFor="qty" className="block text-sm font-semibold text-gray-700 mb-1">Quantity</label>
                   <input 
+                    id="qty"
+                    name="qty"
                     type="number" 
                     value={state.qty} 
                     onChange={e => dispatch({ type: 'SET_FORM_FIELD', payload: { field: 'qty', value: e.target.value } })} 
@@ -1057,8 +1201,10 @@ export default function Products() {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-1">Min Stock</label>
+                  <label htmlFor="minStock" className="block text-sm font-semibold text-gray-700 mb-1">Min Stock</label>
                   <input 
+                    id="minStock"
+                    name="minStock"
                     type="number" 
                     value={state.minStock} 
                     onChange={e => dispatch({ type: 'SET_FORM_FIELD', payload: { field: 'minStock', value: e.target.value } })} 
@@ -1071,8 +1217,10 @@ export default function Products() {
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-1">Purchase ({currency.symbol})</label>
+                  <label htmlFor="purchase" className="block text-sm font-semibold text-gray-700 mb-1">Purchase ({currency.symbol})</label>
                   <input 
+                    id="purchase"
+                    name="purchase"
                     type="number" 
                     value={state.purchase} 
                     onChange={e => dispatch({ type: 'SET_FORM_FIELD', payload: { field: 'purchase', value: e.target.value } })} 
@@ -1080,15 +1228,12 @@ export default function Products() {
                     className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 outline-none" 
                     disabled={state.loading} 
                   />
-                  {state.selectedProduct && (
-                    <p className="text-xs text-gray-500 mt-1">
-                      Orig: {currency.symbol}{formatCurrency(state.selectedProduct.originalPurchaseRate)}
-                    </p>
-                  )}
                 </div>
                 <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-1">Sale ({currency.symbol})</label>
+                  <label htmlFor="sale" className="block text-sm font-semibold text-gray-700 mb-1">Sale ({currency.symbol})</label>
                   <input 
+                    id="sale"
+                    name="sale"
                     type="number" 
                     value={state.sale} 
                     onChange={e => dispatch({ type: 'SET_FORM_FIELD', payload: { field: 'sale', value: e.target.value } })} 
@@ -1096,15 +1241,9 @@ export default function Products() {
                     className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 outline-none" 
                     disabled={state.loading} 
                   />
-                  {state.selectedProduct && (
-                    <p className="text-xs text-gray-500 mt-1">
-                      Orig: {currency.symbol}{formatCurrency(state.selectedProduct.originalSaleRate)}
-                    </p>
-                  )}
                 </div>
               </div>
 
-              {/* Profit Preview */}
               {state.purchase && state.sale && Number(state.sale) > Number(state.purchase) && (
                 <div className="p-4 bg-gradient-to-r from-green-50 to-emerald-50 rounded-xl border border-green-200">
                   <div className="flex justify-between items-center">
@@ -1120,6 +1259,7 @@ export default function Products() {
                 <input 
                   type="checkbox" 
                   id="allowSale" 
+                  name="allowSale"
                   checked={state.allowSale} 
                   onChange={e => dispatch({ type: 'SET_FORM_FIELD', payload: { field: 'allowSale', value: e.target.checked } })} 
                   disabled={state.loading}
@@ -1130,14 +1270,6 @@ export default function Products() {
                 </label>
               </div>
 
-              {state.selectedProduct && (
-                <div className="p-3 bg-blue-50 rounded-xl border border-blue-200">
-                  <p className="text-xs text-blue-800">
-                    💡 Price changes affect future sales only
-                  </p>
-                </div>
-              )}
-
               <div className="space-y-3 pt-6">
                 <div className="text-xs text-gray-500 mb-2 flex gap-4">
                   <kbd className="px-2 py-1 bg-gray-200 rounded font-mono text-xs">Enter</kbd> to save
@@ -1146,7 +1278,7 @@ export default function Products() {
                 
                 <button
                   onClick={addOrUpdateProduct}
-                  disabled={state.loading || state.isSubmitting}
+                  disabled={state.loading || state.isSubmitting || !state.selectedBranchId}
                   className="w-full bg-gradient-to-r from-gray-900 to-gray-800 hover:from-gray-800 hover:to-gray-700 text-white font-bold py-4 px-6 rounded-xl shadow-lg hover:shadow-xl transition-all disabled:opacity-50 flex items-center justify-center gap-2"
                 >
                   <span className="text-xl">{state.selectedProduct ? '✏️' : '➕'}</span>
@@ -1177,14 +1309,13 @@ export default function Products() {
         </div>
       </main>
 
-      {/* Footer */}
       <footer className="bg-gradient-to-t from-gray-900/95 to-transparent text-white/80 border-t border-white/10 mt-12 py-8">
         <div className="max-w-7xl mx-auto px-4 text-center">
           <p className="text-lg font-semibold tracking-wide mb-4">Inventory management perfected</p>
           <div className="flex flex-wrap items-center justify-center gap-4 text-sm text-gray-400">
             <span>© {new Date().getFullYear()} Stockaroo</span>
             <span>•</span>
-            <span>Branch: {activeBranch?.shopName || "None"}</span>
+            <span>Branch: {state.branches.find(b => b.id === state.selectedBranchId)?.shopName || "None"}</span>
             <span>•</span>
             <span>{currency.flag} {currency.code}</span>
           </div>

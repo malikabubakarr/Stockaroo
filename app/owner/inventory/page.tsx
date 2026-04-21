@@ -2,9 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { collection, query, where, onSnapshot } from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { db, auth } from "@/lib/firebase";
 import { useBranch } from "@/context/BranchContext";
 import Link from "next/link";
+import { onAuthStateChanged } from "firebase/auth";
 
 interface Product {
   id: string;
@@ -17,7 +18,7 @@ interface Product {
   saleRate: number;
   profit: number;
   allowSale: boolean;
-  barcode?: string | number; // Added barcode field
+  barcode?: string | number;
 }
 
 export default function InventoryPage() {
@@ -26,6 +27,13 @@ export default function InventoryPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [search, setSearch] = useState("");
   const [offline, setOffline] = useState(!navigator.onLine);
+  const [ownerId, setOwnerId] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  // Helper function for user-centric products collection
+  const getProductsCollection = (userId: string) => {
+    return collection(db, "users", userId, "products");
+  };
 
   // Detect offline / online
   useEffect(() => {
@@ -41,12 +49,24 @@ export default function InventoryPage() {
     };
   }, []);
 
-  // Load products in real-time
+  // Get current user's ownerId
   useEffect(() => {
-    if (!activeBranch?.id) return;
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        setOwnerId(user.uid);
+      }
+      setIsLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
 
+  // ✅ UPDATED: Load products from user-centric subcollection
+  useEffect(() => {
+    if (!activeBranch?.id || !ownerId) return;
+
+    const productsRef = getProductsCollection(ownerId);
     const q = query(
-      collection(db, "products"),
+      productsRef,
       where("branchId", "==", activeBranch.id)
     );
 
@@ -64,7 +84,7 @@ export default function InventoryPage() {
           saleRate: data.saleRate,
           profit: data.profit,
           allowSale: data.allowSale,
-          barcode: data.barcode ? String(data.barcode) : "", // Convert to string
+          barcode: data.barcode ? String(data.barcode) : "",
         };
       }) as Product[];
 
@@ -72,7 +92,7 @@ export default function InventoryPage() {
     });
 
     return () => unsub();
-  }, [activeBranch]);
+  }, [activeBranch, ownerId]);
 
   // Search & sort - includes barcode search
   let filtered = products.filter((p) => {
@@ -99,6 +119,17 @@ export default function InventoryPage() {
 
     return a.name.localeCompare(b.name);
   });
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-4 border-gray-900 border-t-transparent mx-auto mb-4"></div>
+          <p className="text-gray-600 font-medium">Loading Inventory...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 p-6">

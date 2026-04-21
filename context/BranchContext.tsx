@@ -3,12 +3,14 @@
 import { createContext, useContext, useState, ReactNode, useEffect } from "react";
 
 export interface Branch {
-  currency: string;
-  currencySymbol: string;
   id: string;
   shopName: string;
   ownerId: string;
   isMain?: boolean;
+  currency: string;
+  currencySymbol?: string;
+  location?: string;  // ← CHANGE THIS to optional string, not JSX.Element
+  branchNumber?: number;  // ← ADD THIS
 }
 
 interface BranchContextType {
