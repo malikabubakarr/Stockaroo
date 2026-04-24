@@ -427,11 +427,11 @@ export default function InvoiceManagementPage() {
     }
   };
 
-  // Add payment - ONLY after delivery
+  // Add payment - ONLY after delivery (THIS MARKS AS PAID WHEN CASH RECEIVED)
   const addPayment = async () => {
     if (!selectedInvoice || !ownerId || !activeBranch?.id) return;
 
-    // FIX 1: Check if invoice is delivered before allowing payment
+    // Check if invoice is delivered before allowing payment
     if (!selectedInvoice.isDelivered && selectedInvoice.status !== "delivered") {
       showToast('error', 'Not Delivered', 'Please mark invoice as delivered first before adding payments');
       return;
@@ -508,11 +508,11 @@ export default function InvoiceManagementPage() {
     }
   };
 
-  // Add remaining to credit - ONLY after delivery
+  // Convert to Credit - ONLY adds to customer credit, invoice remains UNPAID
   const addToCredit = async () => {
     if (!selectedInvoice || !ownerId || !activeBranch?.id) return;
     
-    // FIX 2: Check if invoice is delivered before allowing credit conversion
+    // Check if invoice is delivered before allowing credit conversion
     if (!selectedInvoice.isDelivered && selectedInvoice.status !== "delivered") {
       showToast('error', 'Not Delivered', 'Please mark invoice as delivered first before converting to credit');
       return;
@@ -523,7 +523,7 @@ export default function InvoiceManagementPage() {
       return;
     }
 
-    if (!confirm(`This will convert ${currency.symbol}${selectedInvoice.balance.toLocaleString()} to customer's credit balance. The invoice will be marked as paid. Continue?`)) {
+    if (!confirm(`This will add ${currency.symbol}${selectedInvoice.balance.toLocaleString()} to customer's credit balance. Invoice will remain UNPAID (Credit). Continue?`)) {
       return;
     }
 
@@ -541,16 +541,18 @@ export default function InvoiceManagementPage() {
         updatedAt: serverTimestamp(),
       });
       
-      // Update invoice - mark as paid
+      // Update invoice - KEEP AS CREDIT, DO NOT MARK AS PAID
+      // Balance remains the same, payment status stays as "credit"
       const invoiceRef = doc(db, "users", ownerId, "invoices", selectedInvoice.id);
       batch.update(invoiceRef, {
-        paid: selectedInvoice.total,
-        balance: 0,
-        paymentStatus: "paid",
-        notes: (selectedInvoice.notes || "") + `\n[${new Date().toLocaleString()}] Remaining balance ${currency.symbol}${selectedInvoice.balance.toLocaleString()} converted to customer credit. No cash received.`,
+        notes: (selectedInvoice.notes || "") + `\n[${new Date().toLocaleString()}] Remaining balance ${currency.symbol}${selectedInvoice.balance.toLocaleString()} added to customer credit. Invoice remains UNPAID.`,
+        updatedAt: serverTimestamp(),
+        // DO NOT change paid amount
+        // DO NOT change balance to 0
+        // DO NOT change paymentStatus to "paid"
       });
       
-      // Add ledger entry for credit conversion
+      // Add ledger entry for credit conversion (this is just a note, not a payment)
       const ledgerRef = getUserCollection(ownerId, "ledger");
       const ledgerDoc = doc(ledgerRef);
       batch.set(ledgerDoc, {
@@ -562,12 +564,12 @@ export default function InvoiceManagementPage() {
         invoiceNumber: selectedInvoice.invoiceNumber,
         branchId: activeBranch.id,
         date: serverTimestamp(),
-        note: `Remaining balance ${currency.symbol}${selectedInvoice.balance.toLocaleString()} converted to customer credit. No cash received.`,
+        note: `Remaining balance ${currency.symbol}${selectedInvoice.balance.toLocaleString()} added to customer credit. Invoice remains UNPAID. Cash not received.`,
       });
       
       await batch.commit();
       
-      showToast('success', 'Converted to Credit', `${currency.symbol}${selectedInvoice.balance.toLocaleString()} added to customer's credit balance. Invoice marked as paid.`);
+      showToast('info', 'Converted to Credit', `${currency.symbol}${selectedInvoice.balance.toLocaleString()} added to customer's credit balance. Invoice remains UNPAID.`);
       setShowDetailModal(false);
       setSelectedInvoice(null);
       
@@ -715,6 +717,7 @@ export default function InvoiceManagementPage() {
           <div className={`rounded-xl shadow-lg p-4 max-w-md border ${
             toast.type === 'success' ? 'bg-green-50 border-green-200' :
             toast.type === 'error' ? 'bg-red-50 border-red-200' :
+            toast.type === 'warning' ? 'bg-yellow-50 border-yellow-200' :
             'bg-blue-50 border-blue-200'
           }`}>
             <div className="flex items-center gap-3">
@@ -772,9 +775,9 @@ export default function InvoiceManagementPage() {
             <strong>📋 How it works:</strong><br/>
             • <strong>Pending Invoices</strong> - Can be edited (add/remove items, change quantities/prices, add discount)<br/>
             • <strong>Delivered</strong> - Once delivered, invoice cannot be edited<br/>
-            • <strong>Payments & Credit</strong> - Only available AFTER delivery<br/>
-            • <strong>Credit Invoices</strong> - Unpaid invoices appear in Credit List after delivery<br/>
-            • <strong>Process:</strong> Create Invoice → Edit if needed → Mark as Delivered → Add Payments or Convert to Credit
+            • <strong>Payments</strong> - Add actual cash payment to mark invoice as paid/partial<br/>
+            • <strong>Convert to Credit</strong> - Adds balance to customer credit but invoice remains UNPAID<br/>
+            • <strong>Process:</strong> Create Invoice → Edit if needed → Mark as Delivered → Add Payments (Cash) OR Convert to Credit (No Cash)
           </p>
         </div>
 
@@ -970,7 +973,7 @@ export default function InvoiceManagementPage() {
                 </button>
               </div>
 
-              {/* Action Buttons - FIXED: Only show payment/credit options after delivery */}
+              {/* Action Buttons */}
               <div className="flex flex-wrap gap-3 pt-4 border-t">
                 {(!selectedInvoice.isDelivered && selectedInvoice.status !== "delivered") && (
                   <>
@@ -1010,10 +1013,17 @@ export default function InvoiceManagementPage() {
                   </>
                 )}
                 
-                {/* Show message if delivered but fully paid */}
-                {(selectedInvoice.isDelivered || selectedInvoice.status === "delivered") && selectedInvoice.balance === 0 && (
+                {/* Show message if delivered but fully paid (from cash payment, not credit conversion) */}
+                {(selectedInvoice.isDelivered || selectedInvoice.status === "delivered") && selectedInvoice.balance === 0 && selectedInvoice.paymentStatus === "paid" && (
                   <div className="w-full text-center text-green-600 font-semibold py-2">
-                    ✅ Invoice fully paid
+                    ✅ Invoice fully paid (Cash received)
+                  </div>
+                )}
+                
+                {/* Show message if delivered with balance still pending (credit) */}
+                {(selectedInvoice.isDelivered || selectedInvoice.status === "delivered") && selectedInvoice.balance > 0 && selectedInvoice.paymentStatus === "credit" && (
+                  <div className="w-full text-center text-orange-600 font-semibold py-2 text-sm">
+                    ⚠️ Invoice is CREDIT - Customer owes {currency.symbol}{Math.round(selectedInvoice.balance).toLocaleString()}
                   </div>
                 )}
                 
@@ -1279,7 +1289,7 @@ export default function InvoiceManagementPage() {
                 placeholder={`Enter amount (max: ${currency.symbol}${selectedInvoice.balance.toLocaleString()})`}
                 autoFocus
               />
-              <p className="text-xs text-gray-500 mt-1">This records actual cash payment received.</p>
+              <p className="text-xs text-gray-500 mt-1">This records actual cash payment received and will mark invoice as paid/partial.</p>
             </div>
             <div className="flex gap-3">
               <button onClick={() => setShowPaymentModal(false)} className="flex-1 py-2 border rounded-lg">Cancel</button>

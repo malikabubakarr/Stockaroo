@@ -22,7 +22,7 @@ import {
 import { useBranch } from "@/context/BranchContext";
 import Image from "next/image";
 import Link from "next/link";
-import { BrowserMultiFormatReader, DecodeHintType, NotFoundException as ZXingNotFoundException } from '@zxing/library';
+import { BrowserMultiFormatReader, NotFoundException } from "@zxing/library";
 
 // Debug mode - set to false in production
 const DEBUG = false;
@@ -136,9 +136,9 @@ export default function Sales() {
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [isScanning, setIsScanning] = useState(false);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState("");
+  const [isScanningInProgress, setIsScanningInProgress] = useState(false);
   
   const [cart, setCart] = useState<CartItem[]>([]);
   const [discount, setDiscount] = useState(0);
@@ -162,9 +162,10 @@ export default function Sales() {
   const initialLoadDone = useRef(false);
   const syncInProgress = useRef(false);
   const scanTimeoutRef = useRef<NodeJS.Timeout>();
-  const codeReaderRef = useRef<BrowserMultiFormatReader>();
+  const codeReaderRef = useRef<BrowserMultiFormatReader | null>(null);
   const scannerContainerRef = useRef<HTMLDivElement>(null);
   const isProcessingScan = useRef(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
 
   const currencies: CurrencyOption[] = [
     { symbol: "₨", code: "PKR", name: "Pakistani Rupee", flag: "🇵🇰" },
@@ -194,6 +195,42 @@ export default function Sales() {
 
   const getSaleDoc = useCallback((userId: string, saleId: string) => {
     return doc(db, "users", userId, "sales", saleId);
+  }, []);
+
+  // Play beep sound
+  const playBeep = useCallback((type: "success" | "error" = "success") => {
+    try {
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+
+      const audioCtx = audioContextRef.current;
+      const oscillator = audioCtx.createOscillator();
+      const gainNode = audioCtx.createGain();
+
+      oscillator.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+
+      if (type === "success") {
+        oscillator.frequency.value = 880;
+        gainNode.gain.value = 0.3;
+        oscillator.start();
+        setTimeout(() => {
+          oscillator.stop();
+          gainNode.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.2);
+        }, 200);
+      } else {
+        oscillator.frequency.value = 440;
+        gainNode.gain.value = 0.3;
+        oscillator.start();
+        setTimeout(() => {
+          oscillator.stop();
+          gainNode.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.3);
+        }, 300);
+      }
+    } catch (error) {
+      console.log("Audio not supported");
+    }
   }, []);
 
   // Debug logs wrapped
@@ -349,7 +386,7 @@ export default function Sales() {
     return () => unsub();
   }, []);
 
-  // ✅ UPDATED: Load products from user-centric subcollection
+  // Load products from user-centric subcollection
   useEffect(() => {
     if (!activeBranch?.id || !ownerId || isLoading) return;
 
@@ -392,7 +429,7 @@ export default function Sales() {
     return () => unsub();
   }, [ownerId, activeBranch?.id, isLoading, getProductsCollection]);
 
-  // ✅ UPDATED: Load sales from user-centric subcollection
+  // Load sales from user-centric subcollection
   useEffect(() => {
     if (!activeBranch?.id || !ownerId || isLoading) return;
 
@@ -441,57 +478,71 @@ export default function Sales() {
     return () => unsub();
   }, [ownerId, activeBranch?.id, isLoading, getSalesCollection]);
 
-  // FAST BARCODE HANDLER - Auto adds with quantity 1
-  const handleBarcodeInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    if (isProcessingScan.current) return;
-    
-    const value = e.target.value.trim();
-    if (!value) return;
-
-    isProcessingScan.current = true;
-    setSearchTerm(value);
-    setIsScanning(true);
-
-    // Clear previous timeout
-    if (scanTimeoutRef.current) {
-      clearTimeout(scanTimeoutRef.current);
+  // Close camera function
+  const closeCamera = useCallback(() => {
+    if (codeReaderRef.current) {
+      codeReaderRef.current.reset();
+      codeReaderRef.current = null;
     }
+    setIsCameraActive(false);
+    setCameraError("");
+    setIsScanningInProgress(false);
+    if (scannerContainerRef.current) {
+      const videoElement = scannerContainerRef.current.querySelector("video");
+      if (videoElement) {
+        videoElement.pause();
+        videoElement.srcObject = null;
+        videoElement.remove();
+      }
+    }
+  }, []);
 
-    // Scanners send rapid input, detect pause as "scan complete"
-    scanTimeoutRef.current = setTimeout(() => {
-      setIsScanning(false);
-      
-      // 🔍 AUTO-FIND PRODUCT
-      const product = products.find(p => 
-        p.barcode === value || 
-        p.name.toLowerCase().includes(value.toLowerCase()) ||
-        p.id === value
-      );
+  // Handle barcode scan result - Auto adds with quantity 1
+  const handleBarcodeScan = useCallback(
+    (barcode: string) => {
+      if (isProcessingScan.current) return;
+      isProcessingScan.current = true;
+      setIsScanningInProgress(true);
+
+      const product = products.find((p) => p.barcode === barcode);
 
       if (product) {
-        // ✅ AUTO ADD WITH QUANTITY 1
-        if (product.qty >= 1 && product.allowSale) {
-          setSelectedProduct(product);
-          
-          // Auto add to cart with quantity 1
-          setCart((prev) => {
-            const existing = prev.find((c) => c.id === product.id);
-            if (existing) {
-              if (existing.qty + 1 <= product.qty) {
-                showToast('success', '🛒 Scanned & Added', `${product.name} (+1)`);
-                return prev.map((c) =>
-                  c.id === product.id ? { ...c, qty: c.qty + 1 } : c
-                );
-              } else {
-                showToast('error', 'Stock Limit', `Cannot exceed stock: ${product.qty}`);
-                return prev;
-              }
+        if (product.qty <= 0) {
+          playBeep("error");
+          showToast("error", "Out of Stock", `${product.name} is out of stock`);
+          isProcessingScan.current = false;
+          setIsScanningInProgress(false);
+          return;
+        }
+
+        if (!product.allowSale) {
+          playBeep("error");
+          showToast("error", "Not for Sale", `${product.name} cannot be sold`);
+          isProcessingScan.current = false;
+          setIsScanningInProgress(false);
+          return;
+        }
+
+        playBeep("success");
+
+        setCart((prev) => {
+          const existing = prev.find((c) => c.id === product.id);
+          if (existing) {
+            const newQty = existing.qty + 1;
+            if (newQty > product.qty) {
+              showToast("warning", "Stock Limit", `Cannot exceed stock: ${product.qty}`);
+              return prev;
             }
-            showToast('success', '🛒 Scanned & Added', `${product.name}`);
-            return [...prev, { 
-              id: product.id, 
-              name: product.name, 
-              qty: 1, 
+            showToast("success", "Added", `${product.name} x${existing.qty + 1}`);
+            return prev.map((c) => (c.id === product.id ? { ...c, qty: newQty } : c));
+          }
+          showToast("success", "Added", `${product.name} x1`);
+          return [
+            ...prev,
+            {
+              id: product.id,
+              name: product.name,
+              qty: 1,
               price: product.saleRate,
               profit: product.profit,
               purchaseRate: product.purchaseRate,
@@ -499,139 +550,107 @@ export default function Sales() {
               originalProfit: product.profit,
               effectivePrice: product.saleRate,
               effectiveProfit: product.profit,
-            }];
-          });
-          
-          setSearchTerm("");
-          setQty("1");
-        } else if (product.qty < 1) {
-          showToast('error', 'Out of Stock', `${product.name} is out of stock`);
-        } else if (!product.allowSale) {
-          showToast('error', 'Not for Sale', `${product.name} cannot be sold`);
-        }
+            },
+          ];
+        });
       } else {
-        showToast('warning', '❌ Not Found', `No product with barcode/name: "${value}"`);
-        setSearchTerm("");
+        playBeep("error");
+        showToast("error", "Not Found", `Product with barcode ${barcode} not found`);
+        setIsScanningInProgress(false);
       }
-      
-      isProcessingScan.current = false;
-    }, 120);
-  }, [products]);
 
-  // MOBILE CAMERA SCANNER - Auto adds with quantity 1
-  const startCameraScan = useCallback(async () => {
-    try {
-      if (!scannerContainerRef.current) return;
-      
-      setCameraError("");
-      setIsCameraActive(true);
-      
-      // Clear previous video element if exists
-      scannerContainerRef.current.innerHTML = '';
-      
-      // Create video element for scanner
-      const videoElement = document.createElement('video');
-      videoElement.style.width = '100%';
-      videoElement.style.height = '100%';
-      videoElement.style.objectFit = 'cover';
-      scannerContainerRef.current.appendChild(videoElement);
-      
-      const codeReader = new BrowserMultiFormatReader();
-      codeReaderRef.current = codeReader;
-      
-      const hints = new Map();
-      hints.set(DecodeHintType.POSSIBLE_FORMATS, ['CODE_128', 'EAN_13', 'EAN_8', 'UPC_A', 'UPC_E', 'QR_CODE']);
-      
-      await codeReader.decodeFromVideoDevice(
-        null,
-        videoElement,
-        (result, err) => {
+      scanTimeoutRef.current = setTimeout(() => {
+        isProcessingScan.current = false;
+        setIsScanningInProgress(false);
+      }, 500);
+    },
+    [products, playBeep, showToast]
+  );
+
+  // Initialize barcode scanner (same as wholesale page)
+  useEffect(() => {
+    if (!isCameraActive || !scannerContainerRef.current) return;
+
+    const codeReader = new BrowserMultiFormatReader();
+    codeReaderRef.current = codeReader;
+
+    const startScanner = async () => {
+      try {
+        setCameraError("");
+        isProcessingScan.current = false;
+
+        if (!scannerContainerRef.current) return;
+
+        const existingVideo = scannerContainerRef.current.querySelector("video");
+        if (existingVideo) {
+          existingVideo.pause();
+          existingVideo.srcObject = null;
+          existingVideo.remove();
+        }
+
+        const videoElement = document.createElement("video");
+        videoElement.setAttribute("autoplay", "");
+        videoElement.setAttribute("playsinline", "true");
+        videoElement.setAttribute("muted", "true");
+        videoElement.style.width = "100%";
+        videoElement.style.height = "100%";
+        videoElement.style.objectFit = "cover";
+        scannerContainerRef.current.appendChild(videoElement);
+
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter((device) => device.kind === "videoinput");
+
+        let selectedDeviceId = null;
+        for (const device of videoDevices) {
+          if (device.label.toLowerCase().includes("back") || device.label.toLowerCase().includes("rear")) {
+            selectedDeviceId = device.deviceId;
+            break;
+          }
+        }
+
+        await codeReader.decodeFromVideoDevice(selectedDeviceId, videoElement, (result, err) => {
           if (result) {
             const barcode = result.getText();
-            codeReader.reset();
-            setIsCameraActive(false);
-            setSearchTerm(barcode);
-            
-            // Process scanned barcode - Auto add with quantity 1
-            const product = products.find(p => p.barcode === barcode);
-            if (product) {
-              if (product.qty >= 1 && product.allowSale) {
-                setSelectedProduct(product);
-                
-                // Auto add to cart with quantity 1
-                setCart((prev) => {
-                  const existing = prev.find((c) => c.id === product.id);
-                  if (existing) {
-                    if (existing.qty + 1 <= product.qty) {
-                      showToast('success', '📱 Scanned & Added', `${product.name} (+1)`);
-                      return prev.map((c) =>
-                        c.id === product.id ? { ...c, qty: c.qty + 1 } : c
-                      );
-                    } else {
-                      showToast('error', 'Stock Limit', `Cannot exceed stock: ${product.qty}`);
-                      return prev;
-                    }
-                  }
-                  showToast('success', '📱 Scanned & Added', `${product.name}`);
-                  return [...prev, { 
-                    id: product.id, 
-                    name: product.name, 
-                    qty: 1, 
-                    price: product.saleRate,
-                    profit: product.profit,
-                    purchaseRate: product.purchaseRate,
-                    originalPrice: product.saleRate,
-                    originalProfit: product.profit,
-                    effectivePrice: product.saleRate,
-                    effectiveProfit: product.profit,
-                  }];
-                });
-                
-                setSearchTerm("");
-                setQty("1");
-              } else if (product.qty < 1) {
-                showToast('error', 'Out of Stock', `${product.name} is out of stock`);
-              } else if (!product.allowSale) {
-                showToast('error', 'Not for Sale', `${product.name} cannot be sold`);
-              }
-            } else {
-              showToast('warning', '📱 Not Found', `No product with barcode: ${barcode}`);
-              setSearchTerm("");
-            }
+            handleBarcodeScan(barcode);
           }
-          if (err && !(err instanceof ZXingNotFoundException)) {
-            console.error(err);
+          if (err && !(err instanceof NotFoundException)) {
+            console.error("Scanner error:", err);
           }
-        }
-      );
-      
-      // Auto-stop after 30s
-      setTimeout(() => {
-        if (codeReaderRef.current) {
-          codeReaderRef.current.reset();
-          setIsCameraActive(false);
-        }
-      }, 30000);
-      
-    } catch (error: any) {
-      setCameraError(error.message || 'Camera access denied');
-      setIsCameraActive(false);
-      showToast('error', 'Camera Error', error.message || 'Cannot access camera');
-    }
-  }, [products]);
+        });
 
-  // Cleanup effect
-  useEffect(() => {
-    return () => {
-      if (scanTimeoutRef.current) {
-        clearTimeout(scanTimeoutRef.current);
+        setIsScanningInProgress(false);
+      } catch (error) {
+        setCameraError("Camera access denied or not available");
+        console.error("Camera error:", error);
+        setIsCameraActive(false);
       }
+    };
+
+    startScanner();
+
+    return () => {
       if (codeReaderRef.current) {
         codeReaderRef.current.reset();
+        codeReaderRef.current = null;
       }
-      isProcessingScan.current = false;
     };
-  }, []);
+  }, [isCameraActive, handleBarcodeScan]);
+
+  // Start camera scanner
+  const startCameraScan = async () => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showToast("error", "Camera Error", "Camera not supported on this device");
+      return;
+    }
+
+    if (codeReaderRef.current) {
+      codeReaderRef.current.reset();
+      codeReaderRef.current = null;
+    }
+
+    setIsCameraActive(true);
+    setCameraError("");
+  };
 
   // Enhanced search with barcode support - now works with debouncedSearch
   const searchResults = useMemo(() => {
@@ -766,7 +785,7 @@ export default function Sales() {
     setCart((prev) => prev.map((c) => (c.id === id ? { ...c, qty: newQty } : c)));
   }, [products, removeFromCart]);
 
-  // ✅ UPDATED: Complete Sale with offline support (user-centric)
+  // Complete Sale with offline support (user-centric)
   const makeSale = useCallback(async () => {
     if (cart.length === 0) {
       showToast('error', 'Empty Cart', 'Please add items to cart first');
@@ -839,7 +858,7 @@ export default function Sales() {
         return;
       }
 
-      // ✅ UPDATED: Update product quantities under user-centric structure
+      // Update product quantities under user-centric structure
       const updates = cart.map(async (item) => {
         const productRef = getProductDoc(ownerId!, item.id);
         await updateDoc(productRef, { qty: increment(-item.qty) });
@@ -867,7 +886,7 @@ export default function Sales() {
         saleData.employeeId = employeeId;
       }
 
-      // ✅ UPDATED: Save sale under user-centric subcollection
+      // Save sale under user-centric subcollection
       const salesRef = getSalesCollection(ownerId!);
       await addDoc(salesRef, saleData);
 
@@ -884,7 +903,7 @@ export default function Sales() {
     }
   }, [cart, totals, isOffline, ownerId, activeBranch?.id, currentUser, employeeId, currency, discountType, getProductDoc, getSalesCollection]);
 
-  // ✅ UPDATED: Return Item with user-centric structure
+  // Return Item with user-centric structure
   const returnItem = useCallback(async (sale: Sale, item: CartItem) => {
     if (DEBUG) console.log("=== RETURN ATTEMPT START ===");
     
@@ -1044,6 +1063,18 @@ export default function Sales() {
     }).format(amount);
   };
 
+  // Cleanup
+  useEffect(() => {
+    return () => {
+      if (scanTimeoutRef.current) clearTimeout(scanTimeoutRef.current);
+      if (codeReaderRef.current) {
+        codeReaderRef.current.reset();
+        codeReaderRef.current = null;
+      }
+      isProcessingScan.current = false;
+    };
+  }, []);
+
   if (isLoading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 flex items-center justify-center">
@@ -1189,7 +1220,7 @@ export default function Sales() {
               <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
                 <div className="p-2 bg-gradient-to-br from-blue-500 to-purple-600 text-white rounded-2xl shadow-lg">
                   <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M3.707 2.293a1 1 0 00-1.414 1.414l4 4A1 1 0 006 7h.707l4-4A1 1 0 0010.707 2H6A1 1 0 005.707 2.293zM17 11a1 1 0 01-1 1h-3.707l-4 4A1 1 0 008 18H3a1 1 0 01-.707-1.707l4-4A1 1 0 017 13H3a1 1 0 01-1-1V7a1 1 0 011-1h13a1 1 0 011 1v4z"/>
+                    <path fillRule="evenodd" d="M3.707 2.293a1 1 0 00-1.414 1.414l4 4A1 1 0 006 7h.707l4-4A1 1 0 0010.707 2H6A1 1 0 005.707 2.293zM17 11a1 1 0 01-1 1h-3.707l-4 4A1 1 0 008 18H3a1 1 0 01-.707-1.707l4-4A1 1 0 007 13H3a1 1 0 01-1-1V7a1 1 0 011-1h13a1 1 0 011 1v4z"/>
                   </svg>
                 </div>
                 Search & Scan
@@ -1211,7 +1242,7 @@ export default function Sales() {
                     type="text"
                     placeholder="Type product name or scan barcode..."
                     className={`w-full px-5 py-4 rounded-2xl border-2 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/20 outline-none transition-all duration-300 text-lg font-semibold text-gray-900 placeholder-gray-400 ${
-                      isScanning 
+                      isScanningInProgress 
                         ? 'border-green-400 bg-green-50 ring-2 ring-green-200/50' 
                         : 'border-gray-300 hover:border-gray-400'
                     }`}
@@ -1289,7 +1320,7 @@ export default function Sales() {
                   ))}
                 </div>
 
-                {/* Mobile Camera Scanner */}
+                {/* Mobile Camera Scanner - Same as wholesale page */}
                 <div className="grid md:grid-cols-2 gap-3">
                   <button
                     onClick={startCameraScan}
@@ -1307,7 +1338,7 @@ export default function Sales() {
                       </>
                     ) : (
                       <>
-                        📱 <span>Camera Scan</span>
+                        📷 <span>Scan Barcode</span>
                       </>
                     )}
                   </button>
@@ -1341,72 +1372,6 @@ export default function Sales() {
                       </div>
                       <div className="text-2xl font-bold text-emerald-700">
                         {currency.symbol}{selectedProduct.saleRate.toLocaleString()}
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* Camera Modal */}
-                {isCameraActive && (
-                  <div className="fixed inset-0 bg-black/90 backdrop-blur-sm flex items-center justify-center z-[100] p-4 animate-in slide-in-from-bottom-4">
-                    <div className="bg-white rounded-3xl max-w-lg w-full max-h-[90vh] overflow-hidden shadow-2xl">
-                      <div className="bg-gradient-to-r from-purple-500 to-pink-600 text-white p-6 text-center">
-                        <div className="flex items-center justify-center gap-3 mb-2">
-                          <div className="w-3 h-3 bg-green-400 rounded-full animate-ping"></div>
-                          <h3 className="text-2xl font-bold">📱 Camera Scanner</h3>
-                        </div>
-                        <p className="text-purple-100 text-sm opacity-90">
-                          Point at barcode - Auto adds to cart!
-                        </p>
-                      </div>
-
-                      <div className="p-6 bg-gray-50">
-                        <div ref={scannerContainerRef} className="relative w-full aspect-video max-h-96 mx-auto rounded-2xl overflow-hidden shadow-xl border-4 border-purple-200/50">
-                          <div className="absolute inset-0 bg-gradient-to-t from-black/20 to-transparent pointer-events-none">
-                            <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-[280px] h-1 bg-gradient-to-r from-green-400 via-emerald-400 to-green-400 rounded-full animate-pulse shadow-lg"></div>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="p-6 space-y-4 bg-gray-50 border-t">
-                        <div className="text-center text-sm text-gray-600">
-                          Found: <span className="font-mono bg-gray-200 px-2 py-1 rounded text-purple-600 font-semibold">{searchTerm || 'Scanning...'}</span>
-                        </div>
-                        
-                        <div className="flex gap-3 pt-2">
-                          <button
-                            onClick={() => {
-                              if (codeReaderRef.current) {
-                                codeReaderRef.current.reset();
-                              }
-                              setIsCameraActive(false);
-                            }}
-                            className="flex-1 py-4 px-6 bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold rounded-2xl transition-all duration-200 shadow-sm hover:shadow-md"
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            onClick={() => {
-                              setIsCameraActive(false);
-                            }}
-                            className="flex-1 py-4 px-6 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white font-bold rounded-2xl shadow-lg hover:shadow-xl transition-all duration-200"
-                          >
-                            Close
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* Camera Error */}
-                {cameraError && (
-                  <div className="p-4 bg-red-50 border border-red-200 rounded-2xl">
-                    <div className="flex items-start gap-3">
-                      <div className="text-2xl text-red-500 mt-0.5">⚠️</div>
-                      <div>
-                        <p className="font-semibold text-red-800">{cameraError}</p>
-                        <p className="text-sm text-red-600 mt-1">Try USB scanner or check camera permissions</p>
                       </div>
                     </div>
                   </div>
@@ -1694,6 +1659,74 @@ export default function Sales() {
         )}
       </main>
 
+      {/* Camera Modal - Same as wholesale page */}
+      {isCameraActive && (
+        <div className="fixed inset-0 bg-black z-[100] flex flex-col">
+          <div className="bg-gradient-to-r from-purple-600 to-purple-700 text-white p-4 flex justify-between items-center shadow-lg">
+            <div className="min-w-0">
+              <h3 className="text-base sm:text-lg font-bold">📷 Barcode Scanner</h3>
+              <p className="text-xs opacity-90">Align barcode in the center</p>
+            </div>
+            <button
+              onClick={closeCamera}
+              className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center text-2xl hover:bg-white/30 active:scale-95 transition-all shrink-0"
+            >
+              ✕
+            </button>
+          </div>
+
+          <div className="flex-1 relative bg-black">
+            <div ref={scannerContainerRef} className="absolute inset-0 w-full h-full">
+              {!cameraError && (
+                <div className="absolute inset-0 flex items-center justify-center z-10">
+                  <div className="text-white text-sm bg-black/50 px-4 py-2 rounded-full">Loading camera...</div>
+                </div>
+              )}
+            </div>
+
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none px-4">
+              <div className="w-full max-w-md h-1/3 border-2 border-green-400 rounded-lg shadow-lg relative">
+                <div className="absolute top-0 left-0 w-8 h-8 border-t-2 border-l-2 border-green-400"></div>
+                <div className="absolute top-0 right-0 w-8 h-8 border-t-2 border-r-2 border-green-400"></div>
+                <div className="absolute bottom-0 left-0 w-8 h-8 border-b-2 border-l-2 border-green-400"></div>
+                <div className="absolute bottom-0 right-0 w-8 h-8 border-b-2 border-r-2 border-green-400"></div>
+                <div className="absolute inset-0 flex items-center justify-center overflow-hidden">
+                  <div className="w-full h-0.5 bg-green-400 animate-scan"></div>
+                </div>
+              </div>
+            </div>
+
+            {cameraError && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/90 px-4">
+                <div className="text-center p-6">
+                  <div className="text-red-400 text-5xl mb-4">⚠️</div>
+                  <p className="text-red-400 font-semibold mb-4">{cameraError}</p>
+                  <button
+                    onClick={() => {
+                      setCameraError("");
+                      startCameraScan();
+                    }}
+                    className="px-6 py-3 bg-purple-600 text-white rounded-xl font-semibold hover:bg-purple-700"
+                  >
+                    Retry
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="bg-gray-900 p-4">
+            <button
+              onClick={closeCamera}
+              className="w-full py-4 bg-red-600 hover:bg-red-700 text-white rounded-xl font-semibold text-base sm:text-lg active:scale-95 transition-all"
+            >
+              Close Scanner
+            </button>
+            <p className="text-center text-gray-400 text-xs mt-3">Tap on barcode to focus • Hold steady</p>
+          </div>
+        </div>
+      )}
+
       {/* Confirmation Modal */}
       {confirmSale && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
@@ -1773,6 +1806,19 @@ export default function Sales() {
         
         .animate-slide-in {
           animation: slide-in 0.3s ease-out;
+        }
+
+        @keyframes scan {
+          0% {
+            transform: translateY(-50%);
+          }
+          100% {
+            transform: translateY(50%);
+          }
+        }
+        
+        .animate-scan {
+          animation: scan 2s ease-in-out infinite;
         }
 
         .overflow-y-auto::-webkit-scrollbar {

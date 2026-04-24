@@ -205,67 +205,94 @@ export default function AddEmployee() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 px-4">
-      
-      {/* Toast Notification */}
-      {showToast && (
-        <div className="fixed top-4 right-4 z-50 animate-slide-in">
-          <div className={`rounded-2xl shadow-2xl p-4 max-w-md backdrop-blur-xl border ${
-            toastMessage.type === 'success' ? 'bg-green-50 border-green-200' :
-            toastMessage.type === 'error' ? 'bg-red-50 border-red-200' :
-            'bg-blue-50 border-blue-200'
-          }`}>
-            <div className="flex items-start gap-3">
-              <div className={`text-2xl ${
-                toastMessage.type === 'success' ? 'text-green-600' :
-                toastMessage.type === 'error' ? 'text-red-600' :
-                'text-blue-600'
-              }`}>
-                {toastMessage.type === 'success' ? '✅' :
-                 toastMessage.type === 'error' ? '❌' : 'ℹ️'}
+    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900">
+      {/* Cool Header Section */}
+      <div className="relative bg-gradient-to-r from-gray-900 via-gray-800 to-gray-900 text-white overflow-hidden border-b border-white/10">
+        {/* Animated background elements */}
+        <div className="absolute inset-0 opacity-20">
+          <div className="absolute top-0 -left-4 w-72 h-72 bg-purple-500 rounded-full mix-blend-multiply filter blur-xl animate-blob"></div>
+          <div className="absolute top-0 -right-4 w-72 h-72 bg-yellow-500 rounded-full mix-blend-multiply filter blur-xl animate-blob animation-delay-2000"></div>
+          <div className="absolute -bottom-8 left-20 w-72 h-72 bg-pink-500 rounded-full mix-blend-multiply filter blur-xl animate-blob animation-delay-4000"></div>
+        </div>
+        
+        <div className="relative px-6 py-8 md:py-10">
+          <div className="max-w-7xl mx-auto">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+              <div className="flex items-center gap-4">
+                <div className="bg-white/10 backdrop-blur-xl p-3 rounded-2xl">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
+                  </svg>
+                </div>
+                <div>
+                  <h1 className="text-3xl md:text-4xl font-bold bg-gradient-to-r from-white via-gray-200 to-gray-300 bg-clip-text text-transparent">
+                    Add Employee
+                  </h1>
+                  <p className="text-gray-300 mt-1 flex items-center gap-2">
+                    <span className="inline-block w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
+                    Create staff account for your branch
+                  </p>
+                </div>
               </div>
-              <div className="flex-1">
-                <h3 className={`font-bold ${
-                  toastMessage.type === 'success' ? 'text-green-800' :
-                  toastMessage.type === 'error' ? 'text-red-800' :
-                  'text-blue-800'
-                }`}>{toastMessage.title}</h3>
-                <p className={`text-sm mt-1 ${
-                  toastMessage.type === 'success' ? 'text-green-600' :
-                  toastMessage.type === 'error' ? 'text-red-600' :
-                  'text-blue-600'
-                }`}>{toastMessage.message}</p>
-              </div>
-              <button
-                onClick={() => setShowToast(false)}
-                className="text-gray-400 hover:text-gray-600 transition-colors"
+              
+              <Link 
+                href="/owner-dashboard" 
+                className="group relative overflow-hidden bg-white/10 backdrop-blur-xl hover:bg-white/20 text-white px-5 py-2.5 rounded-xl transition-all duration-300 border border-white/20 flex items-center gap-2 w-fit"
               >
-                ✕
-              </button>
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 group-hover:rotate-12 transition-transform" viewBox="0 0 20 20" fill="currentColor">
+                  <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1V4zM3 10a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1v-2zM3 16a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1v-2z" />
+                </svg>
+                <span className="font-medium">Dashboard</span>
+              </Link>
             </div>
           </div>
         </div>
-      )}
+        
+        {/* Curved bottom edge */}
+        <div className="absolute bottom-0 left-0 right-0 h-6 bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 rounded-t-3xl"></div>
+      </div>
 
-      <div className="w-full max-w-md">
-        <div className="text-center mb-4">
-          <Link 
-            href="/owner-dashboard" 
-            className="inline-flex items-center px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg transition-all duration-300 border border-white/20 backdrop-blur-sm"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
-              <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1V4zM3 10a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1v-2zM3 16a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1v-2z" />
-            </svg>
-            Dashboard
-          </Link>
-        </div>
-
-        <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold text-white">Add Employee</h1>
-          <p className="text-gray-400 text-sm mt-1">
-            Create staff account for your branch
-          </p>
-        </div>
+      {/* Main Content */}
+      <div className="max-w-md mx-auto px-4 py-12">
+        {/* Toast Notification */}
+        {showToast && (
+          <div className="fixed top-4 right-4 z-50 animate-slide-in">
+            <div className={`rounded-2xl shadow-2xl p-4 max-w-md backdrop-blur-xl border ${
+              toastMessage.type === 'success' ? 'bg-green-50 border-green-200' :
+              toastMessage.type === 'error' ? 'bg-red-50 border-red-200' :
+              'bg-blue-50 border-blue-200'
+            }`}>
+              <div className="flex items-start gap-3">
+                <div className={`text-2xl ${
+                  toastMessage.type === 'success' ? 'text-green-600' :
+                  toastMessage.type === 'error' ? 'text-red-600' :
+                  'text-blue-600'
+                }`}>
+                  {toastMessage.type === 'success' ? '✅' :
+                   toastMessage.type === 'error' ? '❌' : 'ℹ️'}
+                </div>
+                <div className="flex-1">
+                  <h3 className={`font-bold ${
+                    toastMessage.type === 'success' ? 'text-green-800' :
+                    toastMessage.type === 'error' ? 'text-red-800' :
+                    'text-blue-800'
+                  }`}>{toastMessage.title}</h3>
+                  <p className={`text-sm mt-1 ${
+                    toastMessage.type === 'success' ? 'text-green-600' :
+                    toastMessage.type === 'error' ? 'text-red-600' :
+                    'text-blue-600'
+                  }`}>{toastMessage.message}</p>
+                </div>
+                <button
+                  onClick={() => setShowToast(false)}
+                  className="text-gray-400 hover:text-gray-600 transition-colors"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="bg-white/10 backdrop-blur-xl border border-white/20 rounded-2xl shadow-2xl p-8 space-y-4">
           <div className="text-center text-gray-300 text-sm space-y-1 bg-white/5 rounded-lg p-3">
@@ -362,6 +389,21 @@ export default function AddEmployee() {
       </div>
 
       <style jsx global>{`
+        @keyframes blob {
+          0% {
+            transform: translate(0px, 0px) scale(1);
+          }
+          33% {
+            transform: translate(30px, -50px) scale(1.1);
+          }
+          66% {
+            transform: translate(-20px, 20px) scale(0.9);
+          }
+          100% {
+            transform: translate(0px, 0px) scale(1);
+          }
+        }
+        
         @keyframes slide-in {
           from {
             transform: translateX(100%);
@@ -371,6 +413,18 @@ export default function AddEmployee() {
             transform: translateX(0);
             opacity: 1;
           }
+        }
+        
+        .animate-blob {
+          animation: blob 7s infinite;
+        }
+        
+        .animation-delay-2000 {
+          animation-delay: 2s;
+        }
+        
+        .animation-delay-4000 {
+          animation-delay: 4s;
         }
         
         .animate-slide-in {

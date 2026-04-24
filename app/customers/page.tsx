@@ -1,10 +1,9 @@
 // ============================================
-// PAGE 3: New Customer (app/customers/page.tsx)
+// PAGE 3: Customers (app/customers/page.tsx)
 // ============================================
-// EVERYTHING UNDER USER's COLLECTION - No separate root collections
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { auth, db } from "@/lib/firebase";
 import {
   collection,
@@ -18,6 +17,8 @@ import {
   updateDoc,
   serverTimestamp,
   setDoc,
+  enableNetwork,
+  disableNetwork,
 } from "firebase/firestore";
 import { onAuthStateChanged } from "firebase/auth";
 import Link from "next/link";
@@ -49,6 +50,8 @@ export default function CustomersPage() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
   const [authUser, setAuthUser] = useState<any>(null);
+  const [isOnline, setIsOnline] = useState(true);
+  const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
   
   // Form state
   const [name, setName] = useState("");
@@ -57,7 +60,7 @@ export default function CustomersPage() {
   const [openingBalance, setOpeningBalance] = useState("");
   const [currency] = useState({ symbol: "₨", code: "PKR" });
 
-  // Helper functions for user subcollection
+  // Helper functions
   const getUserCollection = (userId: string, collectionName: string) => {
     return collection(db, "users", userId, collectionName);
   };
@@ -71,7 +74,31 @@ export default function CustomersPage() {
     setTimeout(() => setToast(null), 3000);
   };
 
-  // Load authenticated user - FIXED AUTH
+  // Monitor online/offline status
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      showToast('success', 'Back Online', 'Connected to Firestore. Syncing data...');
+      // Re-enable network
+      enableNetwork(db).catch(console.error);
+    };
+    
+    const handleOffline = () => {
+      setIsOnline(false);
+      showToast('warning', 'Offline Mode', 'You are offline. Changes will sync when online.');
+      disableNetwork(db).catch(console.error);
+    };
+    
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Load authenticated user
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       console.log("🔐 Auth state changed:", user?.uid);
@@ -98,6 +125,7 @@ export default function CustomersPage() {
           await setDoc(userRef, {
             email: user.email,
             name: user.displayName || user.email?.split('@')[0] || "User",
+            role: "owner",
             createdAt: serverTimestamp(),
           });
           console.log("✅ User document created");
@@ -112,16 +140,16 @@ export default function CustomersPage() {
     return () => unsubscribe();
   }, []);
 
-  // Load customers from USER's subcollection - ONLY when ownerId is available
+  // Load customers with REAL-TIME sync - This ensures all devices see same data
   useEffect(() => {
     if (!ownerId) {
       console.log("⏳ Waiting for ownerId...");
       return;
     }
 
-    console.log("📡 Loading customers for owner:", ownerId);
+    console.log("📡 Setting up real-time listener for customers");
+    console.log("Firestore path: users ->", ownerId, "-> customers");
     
-    // Customers are stored at: users/{ownerId}/customers
     const customersRef = getUserCollection(ownerId, "customers");
     const q = query(
       customersRef,
@@ -129,22 +157,53 @@ export default function CustomersPage() {
       orderBy("createdAt", "desc")
     );
 
+    // REAL-TIME listener - updates instantly across all devices
     const unsub = onSnapshot(q, 
       (snap) => {
-        console.log("📊 Customers loaded:", snap.size);
-        const list: Customer[] = snap.docs.map((d) => ({
-          id: d.id,
-          ...d.data()
-        } as Customer));
+        const now = new Date();
+        setLastSyncTime(now);
+        
+        console.log(`📊 Real-time update: ${snap.size} customers at ${now.toLocaleTimeString()}`);
+        
+        const list: Customer[] = snap.docs.map((d) => {
+          const data = d.data();
+          return {
+            id: d.id,
+            name: data.name,
+            phone: data.phone || "",
+            address: data.address || "",
+            openingBalance: data.openingBalance || 0,
+            totalPurchases: data.totalPurchases || 0,
+            isActive: data.isActive,
+            createdAt: data.createdAt,
+            updatedAt: data.updatedAt,
+          } as Customer;
+        });
+        
         setCustomers(list);
+        
+        // Show sync notification (optional - can be removed if annoying)
+        if (snap.docChanges().length > 0 && snap.docChanges().some(change => change.type !== 'added')) {
+          showToast('info', 'Sync Update', `${snap.docChanges().length} customer(s) updated`);
+        }
       },
       (error) => {
-        console.error("❌ Error loading customers:", error);
-        showToast('error', 'Error', 'Failed to load customers');
+        console.error("❌ Firestore error:", error);
+        console.error("Error code:", error.code);
+        console.error("Error message:", error.message);
+        
+        if (error.code === 'permission-denied') {
+          showToast('error', 'Permission Denied', 'Please check your Firestore security rules');
+        } else {
+          showToast('error', 'Connection Error', error.message);
+        }
       }
     );
 
-    return () => unsub();
+    return () => {
+      console.log("🛑 Removing real-time listener");
+      unsub();
+    };
   }, [ownerId]);
 
   // Add or update customer
@@ -155,15 +214,19 @@ export default function CustomersPage() {
     }
 
     if (!ownerId) {
-      console.error("No ownerId available");
-      showToast('error', 'Error', 'User not authenticated. Please refresh the page.');
+      showToast('error', 'Error', 'User not authenticated');
+      return;
+    }
+
+    if (!isOnline) {
+      showToast('error', 'Offline', 'Cannot save while offline. Please check your internet connection.');
       return;
     }
 
     setIsProcessing(true);
     try {
       if (editingCustomer) {
-        // Update existing customer under user's subcollection
+        // Update existing customer
         const customerRef = getUserDoc(ownerId, "customers", editingCustomer.id);
         await updateDoc(customerRef, {
           name: name.trim(),
@@ -174,7 +237,7 @@ export default function CustomersPage() {
         
         showToast('success', 'Updated', `Customer ${name} updated successfully!`);
       } else {
-        // Create new customer under user's subcollection
+        // Create new customer
         const balance = parseFloat(openingBalance) || 0;
         const customersRef = getUserCollection(ownerId, "customers");
         
@@ -190,10 +253,11 @@ export default function CustomersPage() {
         };
 
         console.log("📝 Creating customer:", customerData);
+        
         const docRef = await addDoc(customersRef, customerData);
         console.log("✅ Customer created with ID:", docRef.id);
 
-        // If opening balance exists, add ledger entry under user's subcollection
+        // Add ledger entry for opening balance
         if (balance !== 0) {
           const ledgerRef = getUserCollection(ownerId, "ledger");
           await addDoc(ledgerRef, {
@@ -205,13 +269,12 @@ export default function CustomersPage() {
             date: serverTimestamp(),
             note: `Opening balance for ${name}`,
           });
-          console.log("✅ Ledger entry created for opening balance");
         }
         
-        showToast('success', 'Created', `Customer ${name} added with opening balance ${currency.symbol}${balance.toLocaleString()}`);
+        showToast('success', 'Created', `Customer ${name} added successfully!`);
       }
       
-      // Reset form and close modal
+      // Reset form
       setName("");
       setPhone("");
       setAddress("");
@@ -236,7 +299,7 @@ export default function CustomersPage() {
     setShowAddModal(true);
   };
 
-  // Delete customer (soft delete - just mark inactive)
+  // Delete customer
   const deleteCustomer = async (customer: Customer) => {
     if (!confirm(`Are you sure you want to delete ${customer.name}?`)) return;
     
@@ -262,7 +325,6 @@ export default function CustomersPage() {
     }
   };
 
-  // Show loading state while checking auth
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -274,7 +336,6 @@ export default function CustomersPage() {
     );
   }
 
-  // Show login required if not authenticated
   if (!authUser) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -337,13 +398,13 @@ export default function CustomersPage() {
               </div>
             </div>
             
-<div className="flex flex-wrap items-center gap-3">
-  <Link 
-    href="/owner-dashboard" 
-    className="bg-purple-500 hover:bg-purple-600 px-4 py-2 rounded-lg text-sm font-semibold transition-all flex items-center gap-2"
-  >
-    <span>📊</span> Dashboard
-  </Link>
+            <div className="flex flex-wrap items-center gap-3">
+              <Link 
+                href="/owner-dashboard" 
+                className="bg-purple-500 hover:bg-purple-600 px-4 py-2 rounded-lg text-sm font-semibold transition-all flex items-center gap-2"
+              >
+                <span>📊</span> Dashboard
+              </Link>
               <Link href="/wholesale-sales" className="bg-blue-500 hover:bg-blue-600 px-4 py-2 rounded-lg text-sm font-semibold transition-all">
                 + New Invoice
               </Link>
@@ -359,7 +420,30 @@ export default function CustomersPage() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 py-8">
-        {/* Stats Cards - Responsive Grid */}
+        {/* Sync Status Bar */}
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-xs">
+            <span className={`inline-block w-2 h-2 rounded-full ${isOnline ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></span>
+            <span className="text-gray-600">
+              {isOnline ? '🟢 Live Sync' : '🔴 Offline Mode'}
+            </span>
+            {lastSyncTime && (
+              <span className="text-gray-400 ml-2">
+                Last sync: {lastSyncTime.toLocaleTimeString()}
+              </span>
+            )}
+          </div>
+          <div className="text-xs text-gray-500">
+            {ownerId && (
+              <span>👤 {authUser?.email} | ID: {ownerId.substring(0, 8)}...</span>
+            )}
+          </div>
+          <div className="text-xs text-green-600">
+            🔄 {customers.length} customers in cloud
+          </div>
+        </div>
+
+        {/* Stats Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6 mb-8">
           <div className="bg-white rounded-xl shadow-lg p-4 md:p-6">
             <div className="flex items-center justify-between">
@@ -405,13 +489,14 @@ export default function CustomersPage() {
               setOpeningBalance(""); 
               setShowAddModal(true); 
             }} 
-            className="bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white px-4 md:px-6 py-2 md:py-3 rounded-xl font-semibold shadow-lg transition-all text-sm md:text-base"
+            disabled={!isOnline}
+            className="bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white px-4 md:px-6 py-2 md:py-3 rounded-xl font-semibold shadow-lg transition-all text-sm md:text-base disabled:opacity-50 disabled:cursor-not-allowed"
           >
             + Add New Customer
           </button>
         </div>
 
-        {/* Customer List - Responsive Table */}
+        {/* Customer List */}
         <div className="bg-white rounded-xl shadow-lg overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full min-w-[640px]">
@@ -432,7 +517,7 @@ export default function CustomersPage() {
                       <div className="text-4xl md:text-6xl mb-4">👥</div>
                       <p>No customers found</p>
                       <p className="text-xs md:text-sm mt-1">Click "Add New Customer" to get started</p>
-                    </td>
+                     </td>
                   </tr>
                 ) : (
                   customers.map(customer => (
@@ -440,19 +525,19 @@ export default function CustomersPage() {
                       <td className="px-4 md:px-6 py-3 md:py-4">
                         <div className="font-semibold text-gray-900 text-sm md:text-base">{customer.name}</div>
                         <div className="text-xs text-gray-500 mt-1 hidden sm:block">ID: {customer.id.slice(0, 8)}</div>
-                      </td>
+                       </td>
                       <td className="px-4 md:px-6 py-3 md:py-4 text-gray-600 text-sm">{customer.phone || "-"}</td>
                       <td className="px-4 md:px-6 py-3 md:py-4 text-gray-600 text-sm hidden md:table-cell max-w-[200px] truncate">{customer.address || "-"}</td>
                       <td className="px-4 md:px-6 py-3 md:py-4 text-right">
                         <span className={customer.openingBalance && customer.openingBalance > 0 ? 'text-orange-600 font-semibold text-sm md:text-base' : 'text-gray-500 text-sm'}>
                           {customer.openingBalance ? `${currency.symbol}${customer.openingBalance.toLocaleString()}` : "-"}
                         </span>
-                      </td>
+                       </td>
                       <td className="px-4 md:px-6 py-3 md:py-4 text-right hidden lg:table-cell">
                         <span className="text-blue-600 font-semibold text-sm">
                           {customer.totalPurchases ? `${currency.symbol}${customer.totalPurchases.toLocaleString()}` : "-"}
                         </span>
-                      </td>
+                       </td>
                       <td className="px-4 md:px-6 py-3 md:py-4 text-center whitespace-nowrap">
                         <button 
                           onClick={() => editCustomer(customer)} 
@@ -466,8 +551,8 @@ export default function CustomersPage() {
                         >
                           Delete
                         </button>
-                      </td>
-                    </tr>
+                       </td>
+                     </tr>
                   ))
                 )}
               </tbody>
@@ -475,16 +560,15 @@ export default function CustomersPage() {
           </div>
         </div>
 
-        {/* Info Banner - Responsive */}
+        {/* Info Banner */}
         <div className="mt-6 md:mt-8 bg-blue-50 border border-blue-200 rounded-xl p-3 md:p-4">
           <p className="text-xs md:text-sm text-blue-800">
-            <strong>📋 Note:</strong> All customer data is stored securely under your account. 
-            Opening balances affect credit calculations. Total purchases are automatically updated when invoices are created.
+            <strong>📋 Real-time Sync:</strong> All changes are instantly synced to the cloud and appear on all your devices (mobile, tablet, laptop) automatically. Make sure you're logged in with the same account on all devices.
           </p>
         </div>
       </main>
 
-      {/* Add/Edit Customer Modal - Responsive */}
+      {/* Add/Edit Customer Modal */}
       {showAddModal && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl max-w-[90%] sm:max-w-md w-full shadow-2xl mx-auto">
@@ -566,7 +650,7 @@ export default function CustomersPage() {
                 </button>
                 <button 
                   onClick={saveCustomer} 
-                  disabled={isProcessing} 
+                  disabled={isProcessing || !isOnline} 
                   className="flex-1 bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white px-3 md:px-4 py-2 md:py-3 rounded-xl font-semibold transition-all disabled:opacity-50 text-sm md:text-base"
                 >
                   {isProcessing ? 'Saving...' : (editingCustomer ? 'Update Customer' : 'Create Customer')}
