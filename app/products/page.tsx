@@ -22,6 +22,8 @@ import {
   DocumentData,
   QueryConstraint,
   setDoc,
+  enableNetwork,
+  disableNetwork,
 } from "firebase/firestore";
 import { onAuthStateChanged } from "firebase/auth";
 import * as XLSX from "xlsx";
@@ -62,6 +64,24 @@ interface Branch {
   isMain: boolean;
 }
 
+// Offline banner component
+const OfflineBanner = ({ isOffline }: { isOffline: boolean }) => {
+  if (!isOffline) return null;
+  
+  return (
+    <div className="fixed bottom-4 left-4 right-4 z-50 bg-red-600/95 backdrop-blur-lg rounded-xl p-4 shadow-2xl animate-in slide-in-from-bottom-5">
+      <div className="flex items-center gap-3">
+        <span className="text-2xl">📡</span>
+        <div className="flex-1">
+          <p className="text-white font-bold text-sm">You are offline</p>
+          <p className="text-white/80 text-xs">Viewing cached products. Changes will sync when connection returns.</p>
+        </div>
+        <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>
+      </div>
+    </div>
+  );
+};
+
 interface AppState {
   products: Product[];
   selectedProduct: Product | null;
@@ -85,6 +105,7 @@ interface AppState {
   toast: { message: string; type: string } | null;
   branches: Branch[];
   selectedBranchId: string | null;
+  isInitialLoad: boolean;
 }
 
 type AppAction =
@@ -102,7 +123,8 @@ type AppAction =
   | { type: 'SET_OFFLINE'; payload: boolean }
   | { type: 'SET_OWNER_NAME'; payload: string }
   | { type: 'SET_BRANCHES'; payload: Branch[] }
-  | { type: 'SET_SELECTED_BRANCH'; payload: string | null };
+  | { type: 'SET_SELECTED_BRANCH'; payload: string | null }
+  | { type: 'SET_INITIAL_LOAD'; payload: boolean };
 
 const appReducer = (state: AppState, action: AppAction): AppState => {
   switch (action.type) {
@@ -148,12 +170,14 @@ const appReducer = (state: AppState, action: AppAction): AppState => {
       return { ...state, branches: action.payload };
     case 'SET_SELECTED_BRANCH':
       return { ...state, selectedBranchId: action.payload, products: [], lastDoc: null, hasMore: true };
+    case 'SET_INITIAL_LOAD':
+      return { ...state, isInitialLoad: action.payload };
     default:
       return state;
   }
 };
 
-// Debounce hook with fixed type
+// Debounce hook
 function useDebounce<T extends (...args: any[]) => any>(func: T, wait: number): T {
   const timeoutRef = useRef<ReturnType<typeof setTimeout>>();
   
@@ -181,6 +205,7 @@ export default function Products() {
   const observerRef = useRef<IntersectionObserver | null>(null);
   const requestIdRef = useRef(0);
   const isLoadingProductsRef = useRef(false);
+  const initialLoadDoneRef = useRef(false);
 
   const [state, dispatch] = useReducer(appReducer, {
     products: [],
@@ -205,9 +230,11 @@ export default function Products() {
     toast: null,
     branches: [],
     selectedBranchId: null,
+    isInitialLoad: true,
   });
 
   const [authUser, setAuthUser] = useState<any>(null);
+  const [isOnline, setIsOnline] = useState(true);
   const [currency, setCurrency] = useState<CurrencyOption>({
     symbol: "₨", code: "PKR", name: "Pakistani Rupee", flag: "🇵🇰"
   });
@@ -220,7 +247,7 @@ export default function Products() {
   ];
 
   // ============================================
-  // HELPER FUNCTIONS - USER SUBCOLLECTION
+  // HELPER FUNCTIONS
   // ============================================
   const getUserProductsRef = useCallback((userId: string) => {
     return collection(db, "users", userId, "products");
@@ -237,6 +264,39 @@ export default function Products() {
   const getUserBranchesRef = useCallback((userId: string) => {
     return collection(db, "users", userId, "branches");
   }, []);
+
+  // Load cached products from localStorage offline
+  const loadCachedProducts = useCallback((branchId: string) => {
+    try {
+      const cacheKey = `products_cache_${authUser?.uid}_${branchId}`;
+      const cached = localStorage.getItem(cacheKey);
+      if (cached) {
+        const { products, timestamp } = JSON.parse(cached);
+        // Check if cache is less than 1 hour old
+        if (Date.now() - timestamp < 60 * 60 * 1000) {
+          dispatch({ type: 'SET_PRODUCTS', payload: products });
+          console.log("📦 Loaded cached products for offline mode");
+          return true;
+        }
+      }
+    } catch (e) {
+      console.error("Error loading cached products:", e);
+    }
+    return false;
+  }, [authUser?.uid]);
+
+  // Save products to cache
+  const cacheProducts = useCallback((products: Product[], branchId: string) => {
+    try {
+      const cacheKey = `products_cache_${authUser?.uid}_${branchId}`;
+      localStorage.setItem(cacheKey, JSON.stringify({
+        products,
+        timestamp: Date.now()
+      }));
+    } catch (e) {
+      console.error("Error caching products:", e);
+    }
+  }, [authUser?.uid]);
 
   // Filtered products based on search
   const filteredProducts = useMemo(() => {
@@ -263,26 +323,61 @@ export default function Products() {
     dispatch({ type: 'SET_SEARCH_TERM', payload: value });
   }, 300);
 
+  // Enhanced offline detection with slow connection handling
+  useEffect(() => {
+    let connectionMonitor: NodeJS.Timeout;
+    
+    const checkConnection = async () => {
+      if (!navigator.onLine) {
+        setIsOnline(false);
+        dispatch({ type: 'SET_OFFLINE', payload: true });
+        return;
+      }
+      
+      // Test connection quality
+      try {
+        const startTime = Date.now();
+        await fetch('/api/ping', { method: 'HEAD', cache: 'no-store', signal: AbortSignal.timeout(5000) });
+        const latency = Date.now() - startTime;
+        setIsOnline(latency < 3000);
+        dispatch({ type: 'SET_OFFLINE', payload: latency >= 3000 });
+      } catch {
+        setIsOnline(false);
+        dispatch({ type: 'SET_OFFLINE', payload: true });
+      }
+    };
+
+    const handleOnline = () => {
+      checkConnection();
+      // Try to refresh data when coming back online
+      if (state.selectedBranchId && authUser) {
+        setTimeout(() => loadProducts(true), 500);
+      }
+    };
+    
+    const handleOffline = () => {
+      setIsOnline(false);
+      dispatch({ type: 'SET_OFFLINE', payload: true });
+    };
+
+    checkConnection();
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    connectionMonitor = setInterval(checkConnection, 30000);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+      clearInterval(connectionMonitor);
+    };
+  }, [authUser, state.selectedBranchId]);
+
   // Auth listener
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setAuthUser(user);
     });
     return unsubscribe;
-  }, []);
-
-  // Online/offline status
-  useEffect(() => {
-    const handleStatus = () => {
-      dispatch({ type: 'SET_OFFLINE', payload: !navigator.onLine });
-    };
-    handleStatus();
-    window.addEventListener("online", handleStatus);
-    window.addEventListener("offline", handleStatus);
-    return () => {
-      window.removeEventListener("online", handleStatus);
-      window.removeEventListener("offline", handleStatus);
-    };
   }, []);
 
   // Load user data and branches
@@ -328,13 +423,12 @@ export default function Products() {
       }
     };
     loadUserData();
-  }, [authUser]); // Removed currencies and getUserBranchesRef to prevent re-runs
+  }, [authUser]);
 
   // ============================================
-  // LOAD PRODUCTS - FIXED: Removed state.products from dependencies
+  // LOAD PRODUCTS - WITH OFFLINE SUPPORT
   // ============================================
   const loadProducts = useCallback(async (reset: boolean = true) => {
-    // Prevent concurrent loads
     if (isLoadingProductsRef.current) {
       console.log("⏭️ Skipping - already loading products");
       return;
@@ -343,17 +437,22 @@ export default function Products() {
     const requestId = ++requestIdRef.current;
     isLoadingProductsRef.current = true;
     
-    console.log("🔍 loadProducts called:", { 
-      branchId: state.selectedBranchId, 
-      userId: authUser?.uid,
-      reset,
-      requestId
-    });
-    
     if (!state.selectedBranchId || !authUser) {
       console.log("❌ Cannot load: missing branch or user");
       isLoadingProductsRef.current = false;
       return;
+    }
+    
+    // Try to load from cache first if offline or slow
+    if (!isOnline && reset && !initialLoadDoneRef.current) {
+      const hasCache = loadCachedProducts(state.selectedBranchId);
+      if (hasCache) {
+        dispatch({ type: 'SET_INITIAL_LOAD', payload: false });
+        dispatch({ type: 'SET_LOADING', payload: false });
+        isLoadingProductsRef.current = false;
+        initialLoadDoneRef.current = true;
+        return;
+      }
     }
     
     if (reset) {
@@ -389,9 +488,8 @@ export default function Products() {
       const productsQuery = query(productsRef, ...constraints);
       const snap = await getDocs(productsQuery);
       
-      // Check if this response is still valid (race condition guard)
       if (requestId !== requestIdRef.current) {
-        console.log("⚠️ Ignoring stale response", { requestId, current: requestIdRef.current });
+        console.log("⚠️ Ignoring stale response");
         isLoadingProductsRef.current = false;
         return;
       }
@@ -403,14 +501,24 @@ export default function Products() {
       
       console.log("✅ Products fetched:", newProducts.length);
       
+      let updatedProducts;
       if (reset) {
+        updatedProducts = newProducts;
         dispatch({ type: 'SET_PRODUCTS', payload: newProducts });
       } else {
-        dispatch({ type: 'SET_PRODUCTS', payload: [...state.products, ...newProducts] });
+        updatedProducts = [...state.products, ...newProducts];
+        dispatch({ type: 'SET_PRODUCTS', payload: updatedProducts });
+      }
+      
+      // Cache products for offline use
+      if (reset) {
+        cacheProducts(updatedProducts, state.selectedBranchId);
       }
       
       dispatch({ type: 'SET_LAST_DOC', payload: snap.docs[snap.docs.length - 1] || null });
       dispatch({ type: 'SET_HAS_MORE', payload: snap.docs.length === PAGE_SIZE });
+      dispatch({ type: 'SET_INITIAL_LOAD', payload: false });
+      initialLoadDoneRef.current = true;
       
     } catch (error: any) {
       if (requestId !== requestIdRef.current) {
@@ -419,7 +527,17 @@ export default function Products() {
       }
       
       console.error("❌ Load products error:", error);
-      if (error.message?.includes("index")) {
+      
+      // If offline and we have cached data, use it
+      if (!isOnline) {
+        const hasCache = loadCachedProducts(state.selectedBranchId);
+        if (hasCache) {
+          showToast("Working offline - showing cached products", "info");
+          dispatch({ type: 'SET_INITIAL_LOAD', payload: false });
+        } else {
+          showToast("No cached products available offline", "error");
+        }
+      } else if (error.message?.includes("index")) {
         showToast("Need to create database index. Check Firebase console.", "error");
       } else {
         showToast("Failed to load products", "error");
@@ -431,17 +549,17 @@ export default function Products() {
         isLoadingProductsRef.current = false;
       }
     }
-  }, [state.selectedBranchId, authUser, state.hasMore, state.loadingMore, state.lastDoc, getUserProductsRef, showToast]); // ✅ REMOVED state.products
+  }, [state.selectedBranchId, authUser, state.hasMore, state.loadingMore, state.lastDoc, state.products, getUserProductsRef, showToast, loadCachedProducts, cacheProducts, isOnline]);
 
   // Load products when branch changes
   useEffect(() => {
     if (state.selectedBranchId && authUser) {
-      console.log("🔄 Branch changed or user loaded, fetching products...");
+      initialLoadDoneRef.current = false;
       loadProducts(true);
     }
-  }, [state.selectedBranchId, authUser]); // ✅ REMOVED loadProducts from dependencies
+  }, [state.selectedBranchId, authUser]);
 
-  // Infinite scroll observer with proper cleanup
+  // Infinite scroll observer
   useEffect(() => {
     if (!observerTarget.current || !state.hasMore || state.loadingMore || state.loading) return;
 
@@ -514,7 +632,7 @@ export default function Products() {
     return { id: productId };
   }, [authUser, state.selectedBranchId, cleanBarcode, getUserProductsRef, getUserBarcodeDoc]);
 
-  // Import products from Excel with chunking and duplicate check
+  // Import products from Excel
   const handleImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -672,6 +790,8 @@ export default function Products() {
       }
 
       showToast(`Deleted ${totalDeleted} products`, "success");
+      // Clear cache for this branch
+      localStorage.removeItem(`products_cache_${user.uid}_${state.selectedBranchId}`);
       loadProducts(true);
     } catch (error) {
       console.error("Delete error:", error);
@@ -748,7 +868,7 @@ export default function Products() {
     return true;
   }, [authUser, state.selectedBranchId, state.name, state.qty, state.minStock, state.purchase, state.sale, showToast]);
 
-  // Add or update product with proper submitting state
+  // Add or update product
   const addOrUpdateProduct = useCallback(async () => {
     if (state.isSubmitting || state.loading) return;
     if (!validateProduct()) return;
@@ -810,6 +930,8 @@ export default function Products() {
       }
       
       resetForm();
+      // Clear cache to force refresh
+      localStorage.removeItem(`products_cache_${user.uid}_${state.selectedBranchId}`);
       await loadProducts(true);
     } catch (error: any) {
       showToast(error.message || "Error saving product", "error");
@@ -842,6 +964,8 @@ export default function Products() {
       await deleteDoc(productRef);
       
       showToast("Product deleted", "success");
+      // Clear cache
+      localStorage.removeItem(`products_cache_${user.uid}_${state.selectedBranchId}`);
       resetForm();
       await loadProducts(true);
     } catch (error: any) {
@@ -849,7 +973,7 @@ export default function Products() {
     } finally {
       dispatch({ type: 'SET_LOADING', payload: false });
     }
-  }, [state.selectedProduct, authUser, cleanBarcode, showToast, resetForm, loadProducts, getUserProductDoc, getUserBarcodeDoc]);
+  }, [state.selectedProduct, state.selectedBranchId, authUser, cleanBarcode, showToast, resetForm, loadProducts, getUserProductDoc, getUserBarcodeDoc]);
 
   const getInitials = useCallback((name: string) => {
     return name.split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2);
@@ -940,6 +1064,9 @@ export default function Products() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
+      {/* Offline Banner */}
+      <OfflineBanner isOffline={state.isOffline} />
+
       {/* Toast */}
       {state.toast && (
         <div className="fixed top-4 right-4 z-50 animate-slide-in">
@@ -993,7 +1120,7 @@ export default function Products() {
                 <span className="text-lg">{currency.flag}</span> <span className="font-bold">{currency.symbol}</span>
               </div>
               {state.isOffline && (
-                <div className="bg-red-500/90 text-white px-4 py-2 rounded-xl text-sm font-semibold animate-pulse">📴 Offline</div>
+                <div className="bg-yellow-500/90 text-white px-4 py-2 rounded-xl text-sm font-semibold animate-pulse">📴 Offline Mode</div>
               )}
             </div>
           </div>
@@ -1001,7 +1128,7 @@ export default function Products() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Search */}
+        {/* Search - same as original */}
         <div className="mb-8">
           <div className="relative max-w-2xl mx-auto">
             <input
@@ -1087,7 +1214,7 @@ export default function Products() {
               </div>
             </div>
 
-            {/* Import Excel */}
+            {/* Import Excel - same as original */}
             <div className="bg-gradient-to-br from-emerald-50 to-teal-50 backdrop-blur-xl rounded-2xl shadow-xl border border-emerald-200/60 p-6">
               <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-3">
                 <span className="w-10 h-10 bg-gradient-to-br from-emerald-500 to-teal-500 rounded-xl flex items-center justify-center text-white">📊</span>
@@ -1115,7 +1242,7 @@ export default function Products() {
             </div>
           </div>
 
-          {/* Right Column - Product Form */}
+          {/* Right Column - Product Form (same as original) */}
           <div className="bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border p-6">
             <h2 className="text-xl font-bold text-gray-900 mb-6 flex items-center gap-3">
               <span className="w-10 h-10 bg-gradient-to-br from-blue-500 to-indigo-500 rounded-xl flex items-center justify-center text-white">
@@ -1333,6 +1460,14 @@ export default function Products() {
           to { transform: translateX(0); opacity: 1; }
         }
         .animate-slide-in { animation: slideIn 0.3s ease-out; }
+        
+        @keyframes slideInFromBottom {
+          from { transform: translateY(100%); opacity: 0; }
+          to { transform: translateY(0); opacity: 1; }
+        }
+        .animate-in.slide-in-from-bottom-5 {
+          animation: slideInFromBottom 0.3s ease-out;
+        }
       `}</style>
     </div>
   );

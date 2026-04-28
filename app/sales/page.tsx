@@ -117,6 +117,36 @@ interface OfflineSale {
   localId?: number;
 }
 
+// Offline Banner Component
+const OfflineBanner = ({ isOffline, isSlowConnection }: { isOffline: boolean; isSlowConnection: boolean }) => {
+  if (!isOffline && !isSlowConnection) return null;
+  
+  return (
+    <div className={`fixed bottom-4 left-4 right-4 z-50 backdrop-blur-lg rounded-xl p-4 shadow-2xl animate-in slide-in-from-bottom-5 ${
+      isOffline 
+        ? 'bg-red-600/95 border border-red-400' 
+        : 'bg-yellow-600/95 border border-yellow-400'
+    }`}>
+      <div className="flex items-center gap-3">
+        <span className="text-2xl">{isOffline ? '📡' : '🐢'}</span>
+        <div className="flex-1">
+          <p className="text-white font-bold text-sm">
+            {isOffline ? 'You are offline' : 'Slow connection detected'}
+          </p>
+          <p className="text-white/80 text-xs">
+            {isOffline 
+              ? 'Sales will be saved locally and sync when online.' 
+              : 'Using cached data for better performance.'}
+          </p>
+        </div>
+        {isOffline && (
+          <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 export default function Sales() {
   const { activeBranch } = useBranch();
 
@@ -124,6 +154,7 @@ export default function Sales() {
   const [employeeId, setEmployeeId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isOffline, setIsOffline] = useState(false);
+  const [isSlowConnection, setIsSlowConnection] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isReturnProcessing, setIsReturnProcessing] = useState(false);
   const [toast, setToast] = useState<ToastMessage | null>(null);
@@ -180,7 +211,7 @@ export default function Sales() {
     { symbol: "₫", code: "VND", name: "Vietnamese Dong", flag: "🇻🇳" },
   ];
 
-  // Helper functions for user-centric structure
+  // Helper functions
   const getProductsCollection = useCallback((userId: string) => {
     return collection(db, "users", userId, "products");
   }, []);
@@ -196,6 +227,38 @@ export default function Sales() {
   const getSaleDoc = useCallback((userId: string, saleId: string) => {
     return doc(db, "users", userId, "sales", saleId);
   }, []);
+
+  // Load cached products
+  const loadCachedProducts = useCallback(() => {
+    try {
+      const cached = localStorage.getItem("sales_products_cache");
+      if (cached) {
+        const { products: cachedProducts, timestamp, branchId } = JSON.parse(cached);
+        // Check if cache is less than 1 hour old and matches current branch
+        if (Date.now() - timestamp < 60 * 60 * 1000 && branchId === activeBranch?.id) {
+          setProducts(cachedProducts);
+          if (DEBUG) console.log("📦 Loaded cached products for sales");
+          return true;
+        }
+      }
+    } catch (e) {
+      console.error("Error loading cached products:", e);
+    }
+    return false;
+  }, [activeBranch?.id]);
+
+  // Cache products
+  const cacheProducts = useCallback((productsList: Product[]) => {
+    try {
+      localStorage.setItem("sales_products_cache", JSON.stringify({
+        products: productsList,
+        timestamp: Date.now(),
+        branchId: activeBranch?.id
+      }));
+    } catch (e) {
+      console.error("Error caching products:", e);
+    }
+  }, [activeBranch?.id]);
 
   // Play beep sound
   const playBeep = useCallback((type: "success" | "error" = "success") => {
@@ -233,12 +296,57 @@ export default function Sales() {
     }
   }, []);
 
-  // Debug logs wrapped
+  // Enhanced connection monitoring with slow detection
   useEffect(() => {
-    if (DEBUG) console.log('Return quantities updated:', returnQty);
-  }, [returnQty]);
+    let connectionMonitor: NodeJS.Timeout;
+    
+    const checkConnectionQuality = async () => {
+      if (!navigator.onLine) {
+        setIsOffline(true);
+        setIsSlowConnection(false);
+        return;
+      }
+      
+      try {
+        const startTime = Date.now();
+        await fetch('/api/ping', { method: 'HEAD', cache: 'no-store', signal: AbortSignal.timeout(5000) });
+        const latency = Date.now() - startTime;
+        
+        if (latency > 3000) {
+          setIsOffline(false);
+          setIsSlowConnection(true);
+        } else {
+          setIsOffline(false);
+          setIsSlowConnection(false);
+        }
+      } catch {
+        setIsOffline(true);
+        setIsSlowConnection(false);
+      }
+    };
 
-  // Auto-hide toast after 3 seconds
+    const handleOnline = () => {
+      checkConnectionQuality();
+    };
+    
+    const handleOffline = () => {
+      setIsOffline(true);
+      setIsSlowConnection(false);
+    };
+
+    checkConnectionQuality();
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    connectionMonitor = setInterval(checkConnectionQuality, 30000);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+      clearInterval(connectionMonitor);
+    };
+  }, []);
+
+  // Auto-hide toast
   useEffect(() => {
     if (toast) {
       const timer = setTimeout(() => {
@@ -252,29 +360,13 @@ export default function Sales() {
     setToast({ type, title, message });
   };
 
-  // Debounce search input for product search
+  // Debounce search
   useEffect(() => {
     const timer = setTimeout(() => {
       setDebouncedSearch(searchTerm);
     }, 300);
     return () => clearTimeout(timer);
   }, [searchTerm]);
-
-  /* ---------------- ONLINE / OFFLINE DETECTION & SYNC ---------------- */
-  useEffect(() => {
-    const updateStatus = () => {
-      setIsOffline(!navigator.onLine);
-    };
-
-    updateStatus();
-    window.addEventListener("online", updateStatus);
-    window.addEventListener("offline", updateStatus);
-
-    return () => {
-      window.removeEventListener("online", updateStatus);
-      window.removeEventListener("offline", updateStatus);
-    };
-  }, []);
 
   // Auto-sync offline sales when online
   useEffect(() => {
@@ -322,7 +414,7 @@ export default function Sales() {
     syncOfflineSales();
   }, [isOffline, ownerId, activeBranch?.id, getSalesCollection]);
 
-  /* ---------------- LOAD USER CURRENCY ---------------- */
+  // Load user currency
   useEffect(() => {
     const loadUserCurrency = async (userId: string) => {
       try {
@@ -386,19 +478,12 @@ export default function Sales() {
     return () => unsub();
   }, []);
 
-  // Load products from user-centric subcollection
+  // Load products with cache
   useEffect(() => {
     if (!activeBranch?.id || !ownerId || isLoading) return;
 
     // Load from cache instantly
-    const cached = localStorage.getItem("products_cache");
-    if (cached) {
-      try {
-        setProducts(JSON.parse(cached));
-      } catch (e) {
-        if (DEBUG) console.error("Error parsing products cache:", e);
-      }
-    }
+    loadCachedProducts();
 
     const productsRef = getProductsCollection(ownerId);
     const q = query(
@@ -423,13 +508,15 @@ export default function Sales() {
       setProducts(list);
       
       // Update cache
-      localStorage.setItem("products_cache", JSON.stringify(list));
+      cacheProducts(list);
+    }, (error) => {
+      if (DEBUG) console.error("Error loading products:", error);
     });
 
     return () => unsub();
-  }, [ownerId, activeBranch?.id, isLoading, getProductsCollection]);
+  }, [ownerId, activeBranch?.id, isLoading, getProductsCollection, loadCachedProducts, cacheProducts]);
 
-  // Load sales from user-centric subcollection
+  // Load sales
   useEffect(() => {
     if (!activeBranch?.id || !ownerId || isLoading) return;
 
@@ -478,7 +565,7 @@ export default function Sales() {
     return () => unsub();
   }, [ownerId, activeBranch?.id, isLoading, getSalesCollection]);
 
-  // Close camera function
+  // Close camera
   const closeCamera = useCallback(() => {
     if (codeReaderRef.current) {
       codeReaderRef.current.reset();
@@ -497,7 +584,7 @@ export default function Sales() {
     }
   }, []);
 
-  // Handle barcode scan result - Auto adds with quantity 1
+  // Handle barcode scan
   const handleBarcodeScan = useCallback(
     (barcode: string) => {
       if (isProcessingScan.current) return;
@@ -567,7 +654,7 @@ export default function Sales() {
     [products, playBeep, showToast]
   );
 
-  // Initialize barcode scanner (same as wholesale page)
+  // Initialize barcode scanner
   useEffect(() => {
     if (!isCameraActive || !scannerContainerRef.current) return;
 
@@ -636,7 +723,7 @@ export default function Sales() {
     };
   }, [isCameraActive, handleBarcodeScan]);
 
-  // Start camera scanner
+  // Start camera scan
   const startCameraScan = async () => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       showToast("error", "Camera Error", "Camera not supported on this device");
@@ -652,7 +739,7 @@ export default function Sales() {
     setCameraError("");
   };
 
-  // Enhanced search with barcode support - now works with debouncedSearch
+  // Search results
   const searchResults = useMemo(() => {
     if (!debouncedSearch || debouncedSearch.trim() === "") return [];
     const searchLower = debouncedSearch.toLowerCase();
@@ -666,21 +753,21 @@ export default function Sales() {
       .slice(0, 10);
   }, [products, debouncedSearch]);
 
-  // Handle product selection from search results
+  // Handle product select
   const handleProductSelect = useCallback((product: Product) => {
     setSelectedProduct(product);
     setSearchTerm(product.name);
     setDebouncedSearch(product.name);
   }, []);
 
-  // Clear search and selected product
+  // Clear search
   const clearSearch = useCallback(() => {
     setSearchTerm("");
     setDebouncedSearch("");
     setSelectedProduct(null);
   }, []);
 
-  // Memoized calculations
+  // Totals
   const totals = useMemo(() => {
     const totalPrice = cart.reduce((sum, c) => sum + c.price * c.qty, 0);
     const totalProfit = cart.reduce((sum, c) => sum + c.profit * c.qty, 0);
@@ -701,6 +788,7 @@ export default function Sales() {
     };
   }, [cart, discount, discountType]);
 
+  // Add to cart
   const addToCart = useCallback(() => {
     const product = selectedProduct || products.find((p) => 
       p.name.toLowerCase() === searchTerm.toLowerCase() ||
@@ -785,7 +873,7 @@ export default function Sales() {
     setCart((prev) => prev.map((c) => (c.id === id ? { ...c, qty: newQty } : c)));
   }, [products, removeFromCart]);
 
-  // Complete Sale with offline support (user-centric)
+  // Make sale with offline support
   const makeSale = useCallback(async () => {
     if (cart.length === 0) {
       showToast('error', 'Empty Cart', 'Please add items to cart first');
@@ -821,7 +909,8 @@ export default function Sales() {
         };
       });
 
-      if (isOffline) {
+      // Save offline if no connection
+      if (isOffline || isSlowConnection) {
         const offlineSalesJson = localStorage.getItem("offlineSales");
         const offlineSales: OfflineSale[] = offlineSalesJson ? JSON.parse(offlineSalesJson) : [];
 
@@ -853,12 +942,12 @@ export default function Sales() {
         setDiscount(0);
         setDiscountType("flat");
         
-        showToast('info', 'Saved Offline', 'Sale saved. Will sync when online.');
+        showToast('info', 'Saved Offline', 'Sale saved locally. Will sync when online.');
         setIsProcessing(false);
         return;
       }
 
-      // Update product quantities under user-centric structure
+      // Online - process normally
       const updates = cart.map(async (item) => {
         const productRef = getProductDoc(ownerId!, item.id);
         await updateDoc(productRef, { qty: increment(-item.qty) });
@@ -886,7 +975,6 @@ export default function Sales() {
         saleData.employeeId = employeeId;
       }
 
-      // Save sale under user-centric subcollection
       const salesRef = getSalesCollection(ownerId!);
       await addDoc(salesRef, saleData);
 
@@ -901,9 +989,9 @@ export default function Sales() {
     } finally {
       setIsProcessing(false);
     }
-  }, [cart, totals, isOffline, ownerId, activeBranch?.id, currentUser, employeeId, currency, discountType, getProductDoc, getSalesCollection]);
+  }, [cart, totals, isOffline, isSlowConnection, ownerId, activeBranch?.id, currentUser, employeeId, currency, discountType, getProductDoc, getSalesCollection]);
 
-  // Return Item with user-centric structure
+  // Return item
   const returnItem = useCallback(async (sale: Sale, item: CartItem) => {
     if (DEBUG) console.log("=== RETURN ATTEMPT START ===");
     
@@ -1088,6 +1176,9 @@ export default function Sales() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
+      {/* Offline Banner */}
+      <OfflineBanner isOffline={isOffline} isSlowConnection={isSlowConnection} />
+
       {/* Toast Notification */}
       {toast && (
         <div className="fixed top-4 right-4 z-50 animate-slide-in">
@@ -1167,6 +1258,8 @@ export default function Sales() {
                 </h1>
                 <p className="text-sm text-gray-300">
                   {activeBranch?.shopName || "Select Branch"}
+                  {isOffline && <span className="ml-2 text-yellow-400">(Offline Mode)</span>}
+                  {isSlowConnection && !isOffline && <span className="ml-2 text-orange-400">(Slow Connection)</span>}
                 </p>
               </div>
             </div>
@@ -1201,8 +1294,8 @@ export default function Sales() {
               </div>
 
               {isOffline && (
-                <div className="bg-white/10 backdrop-blur-xl border border-white/30 text-white/90 text-sm px-4 py-2 rounded-xl font-semibold shadow-xl animate-pulse">
-                  📴 Offline
+                <div className="bg-yellow-500/90 backdrop-blur-xl border border-yellow-400 text-white text-sm px-4 py-2 rounded-xl font-semibold shadow-xl animate-pulse">
+                  📴 Offline Mode
                 </div>
               )}
             </div>
@@ -1213,7 +1306,7 @@ export default function Sales() {
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          {/* Left Column - POS Interface */}
+          {/* Left Column */}
           <div className="space-y-6">
             {/* Scanner Search Card */}
             <div className="bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border border-gray-200/60 p-6">
@@ -1227,7 +1320,7 @@ export default function Sales() {
               </h2>
               
               <div className="space-y-4">
-                {/* Product Search Input with working name search */}
+                {/* Product Search */}
                 <div className="relative">
                   <label className="block text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
                     <span>🔍 Search Product by Name or Barcode</span>
@@ -1259,7 +1352,7 @@ export default function Sales() {
                     autoFocus
                   />
                   
-                  {/* Search Results Dropdown - Now shows products by name */}
+                  {/* Search Results */}
                   {debouncedSearch && searchResults.length > 0 && !selectedProduct && (
                     <div className="absolute z-50 w-full mt-2 bg-white rounded-xl shadow-2xl border border-gray-200 max-h-80 overflow-y-auto">
                       {searchResults.map(p => (
@@ -1303,7 +1396,7 @@ export default function Sales() {
                   )}
                 </div>
 
-                {/* Quick Quantity Buttons */}
+                {/* Quick Quantity */}
                 <div className="grid grid-cols-5 gap-2">
                   {[1,2,3,5,10].map(n => (
                     <button
@@ -1320,7 +1413,7 @@ export default function Sales() {
                   ))}
                 </div>
 
-                {/* Mobile Camera Scanner - Same as wholesale page */}
+                {/* Buttons */}
                 <div className="grid md:grid-cols-2 gap-3">
                   <button
                     onClick={startCameraScan}
@@ -1359,7 +1452,7 @@ export default function Sales() {
                   </button>
                 </div>
 
-                {/* Selected Product Display */}
+                {/* Selected Product */}
                 {selectedProduct && (
                   <div className="bg-gradient-to-r from-emerald-50 to-green-50 p-4 rounded-2xl border-2 border-emerald-200">
                     <div className="flex items-center justify-between flex-wrap gap-2">
@@ -1434,7 +1527,7 @@ export default function Sales() {
             </div>
           </div>
 
-          {/* Right Column - Checkout & Summary */}
+          {/* Right Column */}
           <div className="space-y-6">
             <div className="bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border border-gray-200/60 p-6">
               <h2 className="text-xl font-bold text-gray-900 mb-4">Discount</h2>
@@ -1515,6 +1608,12 @@ export default function Sales() {
               >
                 {isProcessing ? 'Processing...' : totals.finalProfit < 0 ? 'Cannot Complete (Negative Profit)' : 'Complete Sale'}
               </button>
+              
+              {(isOffline || isSlowConnection) && cart.length > 0 && (
+                <p className="text-xs text-yellow-400 text-center mt-3">
+                  ⚡ Sale will be saved locally and synced when connection improves
+                </p>
+              )}
             </div>
 
             <button
@@ -1659,7 +1758,7 @@ export default function Sales() {
         )}
       </main>
 
-      {/* Camera Modal - Same as wholesale page */}
+      {/* Camera Modal */}
       {isCameraActive && (
         <div className="fixed inset-0 bg-black z-[100] flex flex-col">
           <div className="bg-gradient-to-r from-purple-600 to-purple-700 text-white p-4 flex justify-between items-center shadow-lg">
@@ -1739,6 +1838,11 @@ export default function Sales() {
               </div>
               <h3 className="text-xl font-bold text-gray-900">Complete Sale?</h3>
               <p className="text-sm text-gray-500 mt-2">This action cannot be undone</p>
+              {isOffline && (
+                <p className="text-xs text-yellow-600 mt-2 bg-yellow-50 p-2 rounded-lg">
+                  📡 You are offline. Sale will be saved locally.
+                </p>
+              )}
             </div>
             
             <div className="bg-gray-50 rounded-xl p-4 mb-6">
@@ -1791,6 +1895,15 @@ export default function Sales() {
         
         .animate-in.slide-in-from-bottom-4 {
           animation: slide-in-from-bottom 0.3s ease-out;
+        }
+
+        @keyframes slide-in-from-bottom-5 {
+          from { opacity: 0; transform: translateY(100%); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .animate-in.slide-in-from-bottom-5 {
+          animation: slide-in-from-bottom-5 0.3s ease-out;
         }
 
         @keyframes slide-in {

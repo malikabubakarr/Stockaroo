@@ -1,7 +1,7 @@
 "use client";
 
 import { useBranch } from "@/context/BranchContext";
-import { useEffect, useState, useCallback, useMemo, memo } from "react";
+import { useEffect, useState, useCallback, useMemo, memo, useRef } from "react";
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import { doc, getDoc, collection, onSnapshot, query, where, orderBy, writeBatch, limit } from "firebase/firestore";
@@ -39,6 +39,18 @@ interface CurrencyOption {
   flag: string;
 }
 
+// Debounce utility
+const debounce = <T extends (...args: any[]) => any>(
+  fn: T,
+  delay: number
+): ((...args: Parameters<T>) => void) => {
+  let timeoutId: NodeJS.Timeout;
+  return (...args: Parameters<T>) => {
+    clearTimeout(timeoutId);
+    timeoutId = setTimeout(() => fn(...args), delay);
+  };
+};
+
 // Memoized StatsCard - Fully Responsive
 const StatsCard = memo(({ 
   title, 
@@ -57,11 +69,27 @@ const StatsCard = memo(({
   isLoading: boolean;
   currencySymbol: string;
 }) => {
-  const formatCurrency = (amount: number) => {
+  const formatCurrency = useCallback((amount: number) => {
     return new Intl.NumberFormat('en-PK', {
       maximumFractionDigits: 0,
     }).format(amount);
-  };
+  }, []);
+
+  if (isLoading) {
+    return (
+      <div className="group relative bg-gradient-to-b from-gray-900/95 to-gray-800/90 backdrop-blur-xl p-2 xs:p-3 sm:p-4 rounded-xl border border-white/10 shadow-2xl overflow-hidden h-full flex flex-col justify-between min-h-[80px] xs:min-h-[90px] sm:min-h-[100px] animate-pulse">
+        <div className="flex items-center justify-between mb-1 xs:mb-1.5 sm:mb-2">
+          <div className="h-2 xs:h-2.5 sm:h-3 bg-white/30 rounded-full w-12 xs:w-14 sm:w-16"></div>
+          <div className="w-4 h-4 xs:w-5 xs:h-5 sm:w-6 sm:h-6 bg-white/20 rounded-lg"></div>
+        </div>
+        <div className="space-y-1">
+          <div className="h-5 xs:h-6 sm:h-7 bg-white/20 rounded w-16 xs:w-20 sm:w-24"></div>
+          <div className="h-3 xs:h-3.5 sm:h-4 bg-white/15 rounded w-20 xs:w-24 sm:w-28"></div>
+          <div className="h-2 xs:h-2.5 sm:h-3 bg-white/10 rounded w-12 xs:w-14 sm:w-16"></div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="group relative bg-gradient-to-b from-gray-900/95 to-gray-800/90 backdrop-blur-xl p-2 xs:p-3 sm:p-4 rounded-xl border border-white/10 shadow-2xl hover:shadow-3xl hover:-translate-y-0.5 transition-all duration-300 overflow-hidden h-full flex flex-col justify-between min-h-[80px] xs:min-h-[90px] sm:min-h-[100px]">
@@ -74,10 +102,10 @@ const StatsCard = memo(({
       
       <div className="space-y-0.5 xs:space-y-1 sm:space-y-1.5 flex-1 flex flex-col justify-end">
         <div className="text-[13px] xs:text-sm sm:text-lg md:text-xl font-bold bg-gradient-to-r from-white to-gray-200 bg-clip-text text-transparent drop-shadow-sm line-clamp-1">
-          {currencySymbol}{isLoading ? '...' : formatCurrency(sales)}
+          {currencySymbol}{formatCurrency(sales)}
         </div>
         <div className="text-[9px] xs:text-xs sm:text-sm font-semibold text-white/90 flex items-center gap-0.5 flex-wrap">
-          <span className="truncate min-w-0">{currencySymbol}{isLoading ? '...' : formatCurrency(profit)}</span> 
+          <span className="truncate min-w-0">{currencySymbol}{formatCurrency(profit)}</span> 
           <span className="text-[8px] xs:text-[10px] sm:text-xs text-gray-300">Profit</span>
         </div>
         <div className="text-[8px] xs:text-[10px] sm:text-xs text-gray-400 font-medium line-clamp-1">{period}</div>
@@ -87,6 +115,58 @@ const StatsCard = memo(({
 });
 
 StatsCard.displayName = 'StatsCard';
+
+// Memoized Branch Button Component
+const BranchButton = memo(({ 
+  branch, 
+  isActive, 
+  onSelect, 
+  currencyCode,
+  currencySymbol 
+}: {
+  branch: Branch;
+  isActive: boolean;
+  onSelect: (branch: Branch) => void;
+  currencyCode: string;
+  currencySymbol: string;
+}) => {
+  const displayName = useMemo(() => 
+    branch.shopName.length > 10 ? `${branch.shopName.slice(0, 10)}...` : branch.shopName,
+    [branch.shopName]
+  );
+
+  const showCurrencyMismatch = useMemo(() => 
+    branch.currency && branch.currency !== currencyCode,
+    [branch.currency, currencyCode]
+  );
+
+  return (
+    <button
+      onClick={() => onSelect(branch)}
+      className={`group relative px-2 xs:px-3 sm:px-4 py-1.5 xs:py-2 sm:py-2.5 rounded-lg text-[10px] xs:text-xs sm:text-sm font-bold border-2 shadow-xl transition-all duration-400 flex items-center gap-1 xs:gap-1.5 sm:gap-2 backdrop-blur-xl flex-shrink-0 whitespace-nowrap hover:scale-[1.02] active:scale-[0.98] h-9 xs:h-10 sm:h-11 min-w-[100px] xs:min-w-[110px] sm:min-w-[130px] max-w-[140px] xs:max-w-[160px] sm:max-w-[180px] ${
+        isActive
+          ? "bg-gradient-to-r from-white/20 to-white/10 text-white border-white/40 shadow-white/20 shadow-2xl ring-2 sm:ring-4 ring-white/30 backdrop-blur-2xl"
+          : "bg-white/10 hover:bg-white/20 text-white/95 border-white/30 hover:border-white/50 hover:shadow-2xl hover:shadow-white/20 backdrop-blur-xl"
+      }`}
+    >
+      <span className="truncate block font-semibold text-[9px] xs:text-xs sm:text-sm max-w-[70%]">
+        {displayName}
+      </span>
+      {branch.isMain && (
+        <span className="text-[8px] xs:text-[10px] sm:text-xs bg-white/20 backdrop-blur-sm text-white px-1 xs:px-1.5 py-0.5 rounded-full font-bold shadow-md ml-auto flex-shrink-0">
+          ⭐
+        </span>
+      )}
+      {showCurrencyMismatch && (
+        <span className="text-[8px] xs:text-[10px] sm:text-xs bg-white/10 backdrop-blur-sm text-white/80 px-0.5 xs:px-1 py-0.5 rounded-full ml-0.5 flex-shrink-0">
+          {branch.currencySymbol || branch.currency}
+        </span>
+      )}
+    </button>
+  );
+});
+
+BranchButton.displayName = 'BranchButton';
 
 export default function OwnerDashboard() {
   const router = useRouter();
@@ -106,6 +186,7 @@ export default function OwnerDashboard() {
     yearSales: 0,
   });
   const [loadingStats, setLoadingStats] = useState(true);
+  const [refreshingStats, setRefreshingStats] = useState(false);
   const [showCurrencyMenu, setShowCurrencyMenu] = useState(false);
   const [showLogoutMenu, setShowLogoutMenu] = useState(false);
   const [currency, setCurrency] = useState<CurrencyOption>({
@@ -121,8 +202,12 @@ export default function OwnerDashboard() {
   const [invoiceCount, setInvoiceCount] = useState(0);
   const [creditCount, setCreditCount] = useState(0);
 
+  // Refs
+  const statsCacheRef = useRef<Stats | null>(null);
+  const unsubscribeRefs = useRef<(() => void)[]>([]);
+
   // Currency list
-  const currencies: CurrencyOption[] = [
+  const currencies: CurrencyOption[] = useMemo(() => [
     { symbol: "₨", code: "PKR", name: "Pakistani Rupee", flag: "🇵🇰" },
     { symbol: "$", code: "USD", name: "US Dollar", flag: "🇺🇸" },
     { symbol: "€", code: "EUR", name: "Euro", flag: "🇪🇺" },
@@ -133,11 +218,33 @@ export default function OwnerDashboard() {
     { symbol: "₦", code: "NGN", name: "Nigerian Naira", flag: "🇳🇬" },
     { symbol: "₪", code: "ILS", name: "Israeli Shekel", flag: "🇮🇱" },
     { symbol: "₫", code: "VND", name: "Vietnamese Dong", flag: "🇻🇳" },
-  ];
+  ], []);
+
+  // Pre-computed initials
+  const ownerInitials = useMemo(() => {
+    if (!ownerName) return "";
+    return ownerName
+      .split(" ")
+      .map((n) => n[0])
+      .join("")
+      .toUpperCase()
+      .slice(0, 2);
+  }, [ownerName]);
+
+  // Debounced localStorage save for stats
+  const debouncedSaveStats = useCallback(
+    debounce((statsData: Stats) => {
+      localStorage.setItem("stats_cache", JSON.stringify(statsData));
+    }, 2000),
+    []
+  );
 
   /* ---------------- LOGOUT FUNCTION ---------------- */
   const handleLogout = async () => {
     try {
+      unsubscribeRefs.current.forEach(unsubscribe => unsubscribe());
+      unsubscribeRefs.current = [];
+      
       localStorage.removeItem("branches_cache");
       localStorage.removeItem("activeBranch");
       localStorage.removeItem("stats_cache");
@@ -168,6 +275,17 @@ export default function OwnerDashboard() {
     };
   }, []);
 
+  /* ---------------- MANUAL REFRESH FUNCTION ---------------- */
+  const handleRefreshStats = useCallback(() => {
+    if (!activeBranch?.id || !currentUser?.uid || refreshingStats) return;
+    
+    setRefreshingStats(true);
+    
+    setTimeout(() => {
+      setRefreshingStats(false);
+    }, 2000);
+  }, [activeBranch?.id, currentUser?.uid, refreshingStats]);
+
   /* ---------------- AUTH + DATA LOAD WITH CACHE ---------------- */
   useEffect(() => {
     const cachedBranches = localStorage.getItem("branches_cache");
@@ -194,7 +312,9 @@ export default function OwnerDashboard() {
     const cachedStats = localStorage.getItem("stats_cache");
     if (cachedStats) {
       try {
-        setStats(JSON.parse(cachedStats));
+        const parsedStats = JSON.parse(cachedStats);
+        setStats(parsedStats);
+        statsCacheRef.current = parsedStats;
         setLoadingStats(false);
       } catch (e) {
         if (DEBUG) console.error("Error parsing stats cache:", e);
@@ -209,7 +329,6 @@ export default function OwnerDashboard() {
         return;
       }
 
-      // Only set user once to avoid infinite loop
       if (!currentUser || currentUser.uid !== user.uid) {
         setCurrentUser(user);
       }
@@ -232,7 +351,6 @@ export default function OwnerDashboard() {
           }
         }
 
-        // Load branches from user-centric subcollection
         const branchesRef = collection(db, "users", ownerId, "branches");
         const branchesQuery = query(branchesRef, orderBy("branchNumber", "asc"));
 
@@ -250,8 +368,11 @@ export default function OwnerDashboard() {
           });
         
           setBranches(branchList);
-          localStorage.setItem("branches_cache", JSON.stringify(branchList));
-        
+          
+          const timeoutId = setTimeout(() => {
+            localStorage.setItem("branches_cache", JSON.stringify(branchList));
+          }, 500);
+          
           const storedBranch = localStorage.getItem("activeBranch");
         
           if (storedBranch && !activeBranch) {
@@ -265,20 +386,26 @@ export default function OwnerDashboard() {
           } else if (branchList.length > 0 && !activeBranch) {
             setActiveBranch(branchList[0]);
           }
+          
+          return () => clearTimeout(timeoutId);
         }, (error) => {
           if (DEBUG) console.error("Error loading branches:", error);
         });
 
+        unsubscribeRefs.current.push(unsubscribeBranches);
         setIsAuthInitialized(true);
-        return () => unsubscribeBranches();
       } catch (error) {
         if (DEBUG) console.error("Error in auth setup:", error);
         setIsAuthInitialized(true);
       }
     });
 
-    return () => unsubscribeAuth();
-  }, [router, currency.code, currency.symbol]); // Removed activeBranch and setActiveBranch from dependencies
+    return () => {
+      unsubscribeAuth();
+      unsubscribeRefs.current.forEach(unsubscribe => unsubscribe());
+      unsubscribeRefs.current = [];
+    };
+  }, [router, currency.code, currency.symbol]);
 
   /* ---------------- UPDATE USER CURRENCY PREFERENCE ---------------- */
   const updateUserCurrency = useCallback(async (selectedCurrency: CurrencyOption) => {
@@ -326,243 +453,230 @@ export default function OwnerDashboard() {
     }
   }, [currentUser?.uid, branches, activeBranch, setActiveBranch]);
 
-  /* ---------------- STATS LOAD ---------------- */
+  /* ---------------- OPTIMIZED STATS LOAD WITH REFRESH SUPPORT ---------------- */
   useEffect(() => {
     if (!activeBranch?.id || !currentUser?.uid) {
       setLoadingStats(false);
       return;
     }
 
+    if (!refreshingStats && statsCacheRef.current) {
+      // Don't show loading if we have cached data
+    } else if (!refreshingStats) {
+      setLoadingStats(true);
+    }
+
     const ownerId = currentUser.uid;
     const branchId = activeBranch.id;
 
-    // Sales are stored in users/{userId}/sales
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    
     const salesQuery = query(
       collection(db, "users", ownerId, "sales"),
       where("branchId", "==", branchId),
+      where("date", ">=", thirtyDaysAgo),
       orderBy("date", "desc"),
-      limit(500)
+      limit(200)
     );
 
+    let processingTimeout: NodeJS.Timeout;
+    let isSubscribed = true;
+    
     const unsubscribe = onSnapshot(salesQuery, (snap) => {
-      let todaySales = 0, todayProfit = 0;
-      let weekSales = 0, weekProfit = 0;
-      let monthSales = 0, monthProfit = 0;
-      let yearSales = 0, yearProfit = 0;
+      if (!isSubscribed) return;
+      
+      const processSales = () => {
+        let todaySales = 0, todayProfit = 0;
+        let weekSales = 0, weekProfit = 0;
+        let monthSales = 0, monthProfit = 0;
+        let yearSales = 0, yearProfit = 0;
 
-      const now = new Date();
-      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      const weekStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-      const yearStart = new Date(now.getFullYear(), 0, 1);
+        const now = new Date();
+        const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const weekStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+        const yearStart = new Date(now.getFullYear(), 0, 1);
 
-      snap.docs.forEach((doc) => {
-        const data = doc.data();
-        const saleDate = data.date?.toDate();
-        
-        if (saleDate) {
-          if (saleDate >= todayStart) {
-            todaySales += data.totalAmount || 0;
-            todayProfit += data.totalProfit || 0;
+        snap.docs.forEach((doc) => {
+          const data = doc.data();
+          const saleDate = data.date?.toDate();
+          
+          if (saleDate) {
+            if (saleDate >= todayStart) {
+              todaySales += data.totalAmount || 0;
+              todayProfit += data.totalProfit || 0;
+            }
+            if (saleDate >= weekStart) {
+              weekSales += data.totalAmount || 0;
+              weekProfit += data.totalProfit || 0;
+            }
+            if (saleDate >= monthStart) {
+              monthSales += data.totalAmount || 0;
+              monthProfit += data.totalProfit || 0;
+            }
+            if (saleDate >= yearStart) {
+              yearSales += data.totalAmount || 0;
+              yearProfit += data.totalProfit || 0;
+            }
           }
-          if (saleDate >= weekStart) {
-            weekSales += data.totalAmount || 0;
-            weekProfit += data.totalProfit || 0;
-          }
-          if (saleDate >= monthStart) {
-            monthSales += data.totalAmount || 0;
-            monthProfit += data.totalProfit || 0;
-          }
-          if (saleDate >= yearStart) {
-            yearSales += data.totalAmount || 0;
-            yearProfit += data.totalProfit || 0;
-          }
+        });
+
+        const statsData = {
+          todayProfit, todaySales,
+          weekProfit, weekSales,
+          monthProfit, monthSales,
+          yearProfit, yearSales,
+        };
+
+        if (isSubscribed) {
+          setStats(statsData);
+          statsCacheRef.current = statsData;
+          debouncedSaveStats(statsData);
+          setLoadingStats(false);
+          setRefreshingStats(false);
         }
-      });
-
-      const statsData = {
-        todayProfit, todaySales,
-        weekProfit, weekSales,
-        monthProfit, monthSales,
-        yearProfit, yearSales,
       };
 
-      setStats(statsData);
-      localStorage.setItem("stats_cache", JSON.stringify(statsData));
-      setLoadingStats(false);
+      if ('requestIdleCallback' in window) {
+        processingTimeout = setTimeout(() => {
+          requestIdleCallback(processSales, { timeout: 100 });
+        }, 0);
+      } else {
+        processingTimeout = setTimeout(processSales, 0);
+      }
     }, (error) => {
       if (DEBUG) console.error("Error loading sales stats:", error);
-      setLoadingStats(false);
+      if (isSubscribed) {
+        setLoadingStats(false);
+        setRefreshingStats(false);
+      }
     });
 
-    return () => unsubscribe();
-  }, [activeBranch?.id, currentUser?.uid]);
+    unsubscribeRefs.current.push(unsubscribe);
+    return () => {
+      isSubscribed = false;
+      if (processingTimeout) clearTimeout(processingTimeout);
+      unsubscribe();
+    };
+  }, [activeBranch?.id, currentUser?.uid, debouncedSaveStats, refreshingStats]);
 
-  /* ---------------- LOAD INVOICE AND CREDIT COUNTS ---------------- */
+  /* ---------------- OPTIMIZED INVOICE AND CREDIT COUNTS ---------------- */
   useEffect(() => {
     if (!activeBranch?.id || !currentUser?.uid) return;
 
     const ownerId = currentUser.uid;
     const branchId = activeBranch.id;
 
-    // Invoices are stored in users/{userId}/invoices
     const invoicesQuery = query(
       collection(db, "users", ownerId, "invoices"),
       where("branchId", "==", branchId)
     );
 
-    const unsubscribeInvoices = onSnapshot(invoicesQuery, (snap) => {
-      setInvoiceCount(snap.size);
+    let processingTimeout: NodeJS.Timeout;
+
+    const unsubscribe = onSnapshot(invoicesQuery, (snap) => {
+      if (processingTimeout) clearTimeout(processingTimeout);
+      
+      processingTimeout = setTimeout(() => {
+        let credit = 0;
+        snap.docs.forEach((doc) => {
+          const status = doc.data().paymentStatus;
+          if (status === "unpaid" || status === "partial") {
+            credit++;
+          }
+        });
+        
+        setInvoiceCount(snap.size);
+        setCreditCount(credit);
+      }, 50);
     }, (error) => {
       if (DEBUG) console.error("Error loading invoices:", error);
     });
 
-    // Count credit bills (unpaid/partial invoices)
-    const creditQuery = query(
-      collection(db, "users", ownerId, "invoices"),
-      where("branchId", "==", branchId),
-      where("paymentStatus", "in", ["unpaid", "partial"])
-    );
-
-    const unsubscribeCredit = onSnapshot(creditQuery, (snap) => {
-      setCreditCount(snap.size);
-    }, (error) => {
-      if (DEBUG) console.error("Error loading credit bills:", error);
-    });
-
+    unsubscribeRefs.current.push(unsubscribe);
     return () => {
-      unsubscribeInvoices();
-      unsubscribeCredit();
+      if (processingTimeout) clearTimeout(processingTimeout);
+      unsubscribe();
     };
   }, [activeBranch?.id, currentUser?.uid]);
 
-  /* ---------------- SAVE ACTIVE BRANCH ---------------- */
+  /* ---------------- OPTIMIZED LOCALSTORAGE SAVES ---------------- */
   useEffect(() => {
-    if (activeBranch) {
+    if (!activeBranch) return;
+    
+    const timeoutId = setTimeout(() => {
       localStorage.setItem("activeBranch", JSON.stringify(activeBranch));
-    }
+    }, 1000);
+    
+    return () => clearTimeout(timeoutId);
   }, [activeBranch]);
 
-  /* ---------------- CURRENCY LOCAL STORAGE ---------------- */
   useEffect(() => {
-    const savedCurrency = localStorage.getItem("currency");
-    if (savedCurrency && !currentUser) {
-      try {
-        setCurrency(JSON.parse(savedCurrency));
-      } catch (e) {}
-    }
-  }, [currentUser]);
-
-  useEffect(() => {
-    localStorage.setItem("currency", JSON.stringify(currency));
+    const timeoutId = setTimeout(() => {
+      localStorage.setItem("currency", JSON.stringify(currency));
+    }, 500);
+    
+    return () => clearTimeout(timeoutId);
   }, [currency]);
-
-  /* ---------------- HELPER ---------------- */
-  const getInitials = useCallback((name: string) =>
-    name
-      .split(" ")
-      .map((n) => n[0])
-      .join("")
-      .toUpperCase()
-      .slice(0, 2), []);
 
   // Memoized branch list
   const branchElements = useMemo(() => {
-    return branches.map((branch) => {
-      return (
-        <button
-          key={branch.id}
-          onClick={() => {
-            setActiveBranch(branch);
-            localStorage.setItem("activeBranch", JSON.stringify(branch));
-          }}
-          className={`group relative px-2 xs:px-3 sm:px-4 py-1.5 xs:py-2 sm:py-2.5 rounded-lg text-[10px] xs:text-xs sm:text-sm font-bold border-2 shadow-xl transition-all duration-400 flex items-center gap-1 xs:gap-1.5 sm:gap-2 backdrop-blur-xl flex-shrink-0 whitespace-nowrap hover:scale-[1.02] active:scale-[0.98] h-9 xs:h-10 sm:h-11 min-w-[100px] xs:min-w-[110px] sm:min-w-[130px] max-w-[140px] xs:max-w-[160px] sm:max-w-[180px] ${
-            activeBranch?.id === branch.id
-              ? "bg-gradient-to-r from-white/20 to-white/10 text-white border-white/40 shadow-white/20 shadow-2xl ring-2 sm:ring-4 ring-white/30 backdrop-blur-2xl"
-              : "bg-white/10 hover:bg-white/20 text-white/95 border-white/30 hover:border-white/50 hover:shadow-2xl hover:shadow-white/20 backdrop-blur-xl"
-          }`}
-        >
-          <span className="truncate block font-semibold text-[9px] xs:text-xs sm:text-sm max-w-[70%]">
-            {branch.shopName.length > 10 ? `${branch.shopName.slice(0, 10)}...` : branch.shopName}
-          </span>
-          {branch.isMain && (
-            <span className="text-[8px] xs:text-[10px] sm:text-xs bg-white/20 backdrop-blur-sm text-white px-1 xs:px-1.5 py-0.5 rounded-full font-bold shadow-md ml-auto flex-shrink-0">
-              ⭐
-            </span>
-          )}
-          {branch.currency && branch.currency !== currency.code && (
-            <span className="text-[8px] xs:text-[10px] sm:text-xs bg-white/10 backdrop-blur-sm text-white/80 px-0.5 xs:px-1 py-0.5 rounded-full ml-0.5 flex-shrink-0">
-              {branch.currencySymbol || branch.currency}
-            </span>
-          )}
-        </button>
-      );
-    });
-  }, [branches, activeBranch?.id, currency.code, currency.symbol, setActiveBranch]);  
+    return branches.map((branch) => (
+      <BranchButton
+        key={branch.id}
+        branch={branch}
+        isActive={activeBranch?.id === branch.id}
+        onSelect={setActiveBranch}
+        currencyCode={currency.code}
+        currencySymbol={currency.symbol}
+      />
+    ));
+  }, [branches, activeBranch?.id, currency.code, currency.symbol, setActiveBranch]);
   
   // Memoized stats cards
   const statsCards = useMemo(() => {
-    if (activeBranch && !loadingStats) {
-      return (
-        <div className="grid grid-cols-2 xs:grid-cols-3 sm:grid-cols-4 gap-1.5 xs:gap-2 sm:gap-3 w-full">
-          <StatsCard
-            title="Today"
-            sales={stats.todaySales}
-            profit={stats.todayProfit}
-            period="Live"
-            icon="📈"
-            isLoading={false}
-            currencySymbol={currency.symbol}
-          />
-          <StatsCard
-            title="Week"
-            sales={stats.weekSales}
-            profit={stats.weekProfit}
-            period="7 Days"
-            icon="📊"
-            isLoading={false}
-            currencySymbol={currency.symbol}
-          />
-          <StatsCard
-            title="Month"
-            sales={stats.monthSales}
-            profit={stats.monthProfit}
-            period="30 Days"
-            icon="📅"
-            isLoading={false}
-            currencySymbol={currency.symbol}
-          />
-          <StatsCard
-            title="Year"
-            sales={stats.yearSales}
-            profit={stats.yearProfit}
-            period="YTD"
-            icon="🎯"
-            isLoading={false}
-            currencySymbol={currency.symbol}
-          />
-        </div>
-      );
-    }
-    
     return (
       <div className="grid grid-cols-2 xs:grid-cols-3 sm:grid-cols-4 gap-1.5 xs:gap-2 sm:gap-3 w-full">
-        {Array(4).fill(0).map((_, i) => (
-          <div key={i} className="group relative bg-gradient-to-b from-gray-900/80 to-gray-800/70 backdrop-blur-xl p-2 xs:p-3 sm:p-4 rounded-xl border border-white/10 shadow-2xl animate-pulse h-full flex flex-col justify-between min-h-[80px] xs:min-h-[90px] sm:min-h-[100px]">
-            <div className="flex items-center justify-between mb-1 xs:mb-1.5 sm:mb-2">
-              <div className="h-2 xs:h-2.5 sm:h-3 bg-white/30 rounded-full w-8 xs:w-10 sm:w-14"></div>
-              <div className="w-4 h-4 xs:w-5 xs:h-5 sm:w-6 sm:h-6 bg-white/20 rounded-lg xs:rounded-xl"></div>
-            </div>
-            <div className="space-y-0.5 xs:space-y-1 sm:space-y-1.5">
-              <div className="h-4 xs:h-5 sm:h-7 bg-white/20 rounded-lg xs:rounded-xl w-16 xs:w-20 sm:w-24"></div>
-              <div className="h-2 xs:h-3 sm:h-4 bg-white/20 rounded-full w-12 xs:w-16 sm:w-20"></div>
-              <div className="h-1.5 xs:h-2 sm:h-3 bg-white/15 rounded w-10 xs:w-12 sm:w-16"></div>
-            </div>
-          </div>
-        ))}
+        <StatsCard
+          title="Today"
+          sales={stats.todaySales}
+          profit={stats.todayProfit}
+          period="Live"
+          icon="📈"
+          isLoading={loadingStats || refreshingStats}
+          currencySymbol={currency.symbol}
+        />
+        <StatsCard
+          title="Week"
+          sales={stats.weekSales}
+          profit={stats.weekProfit}
+          period="7 Days"
+          icon="📊"
+          isLoading={loadingStats || refreshingStats}
+          currencySymbol={currency.symbol}
+        />
+        <StatsCard
+          title="Month"
+          sales={stats.monthSales}
+          profit={stats.monthProfit}
+          period="30 Days"
+          icon="📅"
+          isLoading={loadingStats || refreshingStats}
+          currencySymbol={currency.symbol}
+        />
+        <StatsCard
+          title="Year"
+          sales={stats.yearSales}
+          profit={stats.yearProfit}
+          period="YTD"
+          icon="🎯"
+          isLoading={loadingStats || refreshingStats}
+          currencySymbol={currency.symbol}
+        />
       </div>
     );
-  }, [activeBranch, loadingStats, stats, currency.symbol]);
+  }, [stats, loadingStats, refreshingStats, currency.symbol]);
 
   // Memoized menu cards
   const menuCards = useMemo(() => {
@@ -615,11 +729,11 @@ export default function OwnerDashboard() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 text-gray-900">
+      {/* Header - NOT sticky */}
       <header className="bg-gradient-to-b from-gray-900 via-gray-900/95 to-gray-900/90 text-white shadow-2xl border-b border-white/10">
         <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
           {/* TOP BAR */}
           <div className="flex items-center justify-between py-4">
-            {/* LEFT: LOGO */}
             <div className="flex items-center gap-3">
               <Image
                 src="/stockaro-logo.png"
@@ -632,19 +746,16 @@ export default function OwnerDashboard() {
               <h1 className="text-lg sm:text-2xl font-bold">Stockaroo</h1>
             </div>
 
-            {/* RIGHT ACTIONS */}
             <div className="flex items-center gap-3">
-              {/* PROFILE */}
               <div>
                 <button 
                   onClick={() => setShowLogoutMenu(!showLogoutMenu)}
                   className="w-9 h-9 rounded-xl bg-white/10 flex items-center justify-center font-bold hover:bg-white/20 transition-all"
                 >
-                  {getInitials(ownerName)}
+                  {ownerInitials}
                 </button>
               </div>
 
-              {/* CURRENCY */}
               <div>
                 <button
                   onClick={() => setShowCurrencyMenu(!showCurrencyMenu)}
@@ -667,13 +778,37 @@ export default function OwnerDashboard() {
             </div>
           )}
 
-          {/* STATS */}
+          {/* STATS HEADER WITH REFRESH BUTTON */}
+          <div className="flex items-center justify-between pb-3">
+            <div className="text-sm text-gray-300 font-medium">
+              {refreshingStats ? (
+                <span className="flex items-center gap-2">
+                  <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                  Refreshing stats...
+                </span>
+              ) : (
+                <span>📊 Real-time Stats</span>
+              )}
+            </div>
+            <button
+              onClick={handleRefreshStats}
+              disabled={refreshingStats || !activeBranch}
+              className="bg-white/10 hover:bg-white/20 backdrop-blur-sm px-3 py-1.5 rounded-lg text-xs font-medium transition-all disabled:opacity-50 flex items-center gap-1"
+            >
+              <svg className={`w-3 h-3 ${refreshingStats ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              <span>Refresh</span>
+            </button>
+          </div>
+
+          {/* STATS CARDS */}
           <div className="pb-6">
             {statsCards}
           </div>
         </div>
 
-        {/* DROPDOWNS */}
+        {/* LOGOUT DROPDOWN */}
         {showLogoutMenu && (
           <>
             <div
@@ -696,6 +831,7 @@ export default function OwnerDashboard() {
           </>
         )}
 
+        {/* CURRENCY DROPDOWN */}
         {showCurrencyMenu && (
           <>
             <div
@@ -746,7 +882,6 @@ export default function OwnerDashboard() {
 
           {/* Invoices and Credit Bills Blocks */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-8">
-            {/* Invoices Block */}
             <Link href="/invoice-management">
               <div className="group bg-gradient-to-br from-blue-500 to-blue-700 rounded-2xl shadow-xl overflow-hidden cursor-pointer transform transition-all duration-300 hover:scale-105 hover:shadow-2xl">
                 <div className="p-6 md:p-8">
@@ -770,7 +905,6 @@ export default function OwnerDashboard() {
               </div>
             </Link>
 
-            {/* Credit Bills Block */}
             <Link href="/credit-list">
               <div className="group bg-gradient-to-br from-orange-500 to-red-600 rounded-2xl shadow-xl overflow-hidden cursor-pointer transform transition-all duration-300 hover:scale-105 hover:shadow-2xl">
                 <div className="p-6 md:p-8">
@@ -801,7 +935,6 @@ export default function OwnerDashboard() {
       <footer className="bg-gradient-to-t from-gray-900/95 via-gray-900/90 to-gray-900/80 text-white/95 border-t border-white/10 backdrop-blur-2xl shadow-2xl">
         <div className="w-full px-2 xs:px-3 sm:px-4 md:px-6 lg:px-8 max-w-7xl mx-auto py-4 xs:py-6 sm:py-8">
           <div className="flex flex-col sm:flex-row items-center justify-between gap-3 xs:gap-4 sm:gap-6">
-            {/* Logo & Branding */}
             <div className="flex items-center gap-2 xs:gap-3 sm:gap-4 text-center sm:text-left order-2 sm:order-1 flex-shrink-0">
               <div className="relative flex-shrink-0">
                 <Image
@@ -823,7 +956,6 @@ export default function OwnerDashboard() {
               </div>
             </div>
 
-            {/* Active Branch & Currency */}
             <div className="flex flex-col xs:flex-row items-center gap-2 xs:gap-3 w-full sm:w-auto justify-center sm:justify-start order-1 sm:order-2 bg-white/5 backdrop-blur-xl border border-white/20 rounded-xl sm:rounded-2xl px-3 xs:px-4 sm:px-5 md:px-6 py-3 xs:py-4 shadow-xl">
               <div className="flex items-center gap-1 xs:gap-1.5 p-1.5 xs:p-2 bg-white/10 rounded-lg xs:rounded-xl border border-white/20 min-w-[44px] xs:min-w-[50px] sm:min-w-[60px] justify-center flex-shrink-0">
                 <span className="text-lg xs:text-xl sm:text-2xl md:text-3xl flex-shrink-0">{currency.flag}</span>
