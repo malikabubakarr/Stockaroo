@@ -67,6 +67,24 @@ interface OfflineSale {
   localId?: number;
 }
 
+// Units that support decimal quantities
+const DECIMAL_UNITS = ["liter", "l", "ml", "mg", "kg", "g", "gram"];
+const isDecimalUnit = (unit: string) => {
+  if (!unit) return false;
+  return DECIMAL_UNITS.some(u => unit.toLowerCase().includes(u.toLowerCase()));
+};
+
+// Helper function to detect unit from product name
+const detectUnitFromName = (name: string): string => {
+  const lowerName = name.toLowerCase();
+  if (lowerName.includes("mg")) return "mg";
+  if (lowerName.includes("ml")) return "ml";
+  if (lowerName.includes("liter")) return "liter";
+  if (lowerName.includes("kg")) return "kg";
+  if (lowerName.includes("gram")) return "g";
+  return "pcs";
+};
+
 // Offline Banner Component
 const OfflineBanner = ({ isOffline }: { isOffline: boolean }) => {
   if (!isOffline) return null;
@@ -105,6 +123,9 @@ export default function EmployeeDashboard() {
   const [showToast, setShowToast] = useState(false);
   const [toastMessage, setToastMessage] = useState({ title: "", message: "", type: "success" });
   const [refreshing, setRefreshing] = useState(false);
+  const [quantity, setQuantity] = useState("1");
+  const [selectedProductForQty, setSelectedProductForQty] = useState<Product | null>(null);
+  const [showDecimalInput, setShowDecimalInput] = useState(false);
   
   // Discount state
   const [discount, setDiscount] = useState(0);
@@ -115,6 +136,7 @@ export default function EmployeeDashboard() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const tokenRefreshInterval = useRef<NodeJS.Timeout | null>(null);
   const productsGridRef = useRef<HTMLDivElement>(null);
+  const qtyModalRef = useRef<HTMLDivElement>(null);
 
   // Helper functions
   const getProductsCollection = (userId: string) => collection(db, "users", userId, "products");
@@ -187,6 +209,27 @@ export default function EmployeeDashboard() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
+
+  // Close quantity modal on click outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (qtyModalRef.current && !qtyModalRef.current.contains(e.target as Node)) {
+        setSelectedProductForQty(null);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Update decimal input when product changes
+  useEffect(() => {
+    if (selectedProductForQty) {
+      const unit = selectedProductForQty.unit || detectUnitFromName(selectedProductForQty.name);
+      const isDecimal = isDecimalUnit(unit);
+      setShowDecimalInput(isDecimal);
+      setQuantity(isDecimal ? "1.0" : "1");
+    }
+  }, [selectedProductForQty]);
 
   // Online/offline detection
   useEffect(() => {
@@ -280,24 +323,30 @@ export default function EmployeeDashboard() {
 
       const prodSnap = await getDocs(prodQuery);
 
-      const list = prodSnap.docs.map(d => ({
-        id: d.id,
-        name: d.data().name,
-        saleRate: d.data().saleRate,
-        qty: d.data().qty,
-        unit: d.data().unit,
-        profit: d.data().profit || 0,
-        purchaseRate: d.data().purchaseRate || 0,
-        allowSale: d.data().allowSale,
-        category: d.data().category || "",
-        branchId: d.data().branchId,
-      })) as Product[];
+      const list = prodSnap.docs.map(d => {
+        const data = d.data();
+        let unit = data.unit;
+        if (!unit) {
+          unit = detectUnitFromName(data.name);
+        }
+        return {
+          id: d.id,
+          name: data.name,
+          saleRate: data.saleRate,
+          qty: data.qty,
+          unit: unit,
+          profit: data.profit || 0,
+          purchaseRate: data.purchaseRate || 0,
+          allowSale: data.allowSale,
+          category: data.category || "",
+          branchId: data.branchId,
+        };
+      }) as Product[];
 
       setProducts(list);
       localStorage.setItem(`employee_products_cache_${branchId}`, JSON.stringify(list));
     } catch (error) {
       if (DEBUG) console.error("Error loading products:", error);
-      // If offline and no cache, show error but don't crash
       if (!cachedProducts) {
         showNotification("Error", "Failed to load products", "error");
       }
@@ -404,46 +453,78 @@ export default function EmployeeDashboard() {
     );
   }, [products, debouncedSearch, selectedCategory]);
 
-  // Add to cart
-  const addToCart = useCallback((product: Product, customQty?: number) => {
+  // Open quantity modal
+  const openQuantityModal = useCallback((product: Product, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setSelectedProductForQty(product);
+  }, []);
+
+  // Add to cart with custom quantity
+  const addToCartWithQuantity = useCallback((product: Product, quantityValue: number) => {
     if (product.qty <= 0) {
       showNotification("Out of Stock", "Product is out of stock", "error");
       return;
     }
 
-    const quantity = customQty || 1;
+    const unit = product.unit || detectUnitFromName(product.name);
+    const isDecimal = isDecimalUnit(unit);
+    
+    if (!isDecimal && !Number.isInteger(quantityValue)) {
+      showNotification("Invalid Quantity", `${unit} products must be whole numbers`, "error");
+      return;
+    }
 
-    if (quantity > product.qty) {
-      showNotification("Stock Limit", `Maximum available stock: ${product.qty} ${product.unit}`, "error");
+    if (quantityValue > product.qty) {
+      showNotification("Stock Limit", `Maximum available stock: ${product.qty} ${unit}`, "error");
       return;
     }
 
     setCart(prev => {
       const exist = prev.find(p => p.id === product.id);
       if (exist) {
-        const newQty = exist.qty + quantity;
+        const newQty = exist.qty + quantityValue;
         if (newQty > product.qty) {
-          showNotification("Stock Limit", `Maximum available stock: ${product.qty} ${product.unit}`, "error");
+          showNotification("Stock Limit", `Maximum available stock: ${product.qty} ${unit}`, "error");
           return prev;
         }
-        return prev.map(p => p.id === product.id ? { ...p, qty: newQty } : p);
+        return prev.map(p => p.id === product.id ? { ...p, qty: parseFloat(newQty.toFixed(2)) } : p);
       }
       return [...prev, { 
         id: product.id, 
         name: product.name, 
         price: product.saleRate, 
-        qty: quantity,
-        unit: product.unit,
+        qty: quantityValue,
+        unit: unit,
         profit: product.profit,
         purchaseRate: product.purchaseRate
       }];
     });
+    
+    setSelectedProductForQty(null);
+    showNotification("Item Added", `${product.name} (${quantityValue} ${unit}) added to cart`, "success");
   }, [showNotification]);
 
+  // Quick add (opens modal for quantity selection)
   const quickAddToCart = useCallback((product: Product, e: React.MouseEvent) => {
     e.stopPropagation();
-    addToCart(product, 1);
-  }, [addToCart]);
+    openQuantityModal(product);
+  }, [openQuantityModal]);
+
+  // Direct add with 1 (for non-decimal products)
+  const directAddToCart = useCallback((product: Product, e: React.MouseEvent) => {
+    e.stopPropagation();
+    
+    const unit = product.unit || detectUnitFromName(product.name);
+    const isDecimal = isDecimalUnit(unit);
+    
+    if (isDecimal) {
+      // For decimal products, open modal
+      openQuantityModal(product);
+    } else {
+      // For whole unit products, add directly
+      addToCartWithQuantity(product, 1);
+    }
+  }, [addToCartWithQuantity, openQuantityModal]);
 
   const removeFromCart = useCallback((productId: string) => {
     setCart(prev => prev.filter(item => item.id !== productId));
@@ -456,11 +537,19 @@ export default function EmployeeDashboard() {
       removeFromCart(productId);
       return;
     }
-    if (newQty > product.qty) {
-      showNotification("Stock Limit", `Maximum available stock: ${product.qty} ${product.unit}`, "error");
+    
+    const unit = product.unit || detectUnitFromName(product.name);
+    const isDecimal = isDecimalUnit(unit);
+    if (!isDecimal && !Number.isInteger(newQty)) {
+      showNotification("Invalid Quantity", `${unit} must be whole numbers`, "error");
       return;
     }
-    setCart(prev => prev.map(item => item.id === productId ? { ...item, qty: newQty } : item));
+    
+    if (newQty > product.qty) {
+      showNotification("Stock Limit", `Maximum available stock: ${product.qty} ${unit}`, "error");
+      return;
+    }
+    setCart(prev => prev.map(item => item.id === productId ? { ...item, qty: parseFloat(newQty.toFixed(2)) } : item));
   }, [products, removeFromCart, showNotification]);
 
   const clearCart = useCallback(() => {
@@ -499,12 +588,15 @@ export default function EmployeeDashboard() {
         }
       }
 
+      const totalProfit = cart.reduce((sum, item) => sum + (item.profit || 0) * item.qty, 0);
+      const finalProfit = totalProfit - totals.discountAmount;
+
       if (isOffline) {
         const offlineSales = JSON.parse(localStorage.getItem("employee_offline_sales") || "[]");
         offlineSales.push({
           ownerId, ownerName, branchId, branchName,
           employeeId, employeeName, createdBy: employeeName, role: "employee",
-          items: cart, totalAmount: totals.totalAmount, totalProfit: 0,
+          items: cart, totalAmount: totals.totalAmount, totalProfit: finalProfit,
           discount: totals.discountAmount, discountType, type: "employee_sale",
           date: new Date().toISOString(), createdAt: new Date().toISOString(),
           localId: Date.now(),
@@ -528,7 +620,7 @@ export default function EmployeeDashboard() {
         ownerId, ownerName, branchId, branchName,
         employeeId, employeeName, createdBy: employeeName, role: "employee",
         items: cart.map(item => ({ ...item, total: item.price * item.qty, itemProfit: (item.profit || 0) * item.qty })),
-        totalAmount: totals.totalAmount, totalProfit: 0,
+        totalAmount: totals.totalAmount, totalProfit: finalProfit,
         discount: totals.discountAmount, discountType, type: "employee_sale",
         date: serverTimestamp(), createdAt: serverTimestamp()
       });
@@ -569,6 +661,127 @@ export default function EmployeeDashboard() {
       
       {/* Offline Banner */}
       <OfflineBanner isOffline={isOffline} />
+
+      {/* Quantity Modal */}
+      {selectedProductForQty && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[70] p-4">
+          <div ref={qtyModalRef} className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl animate-in fade-in zoom-in duration-200">
+            <div className="text-center mb-4">
+              <div className="text-3xl mb-2">🔢</div>
+              <h3 className="text-lg font-bold text-gray-900">{selectedProductForQty.name}</h3>
+              <p className="text-sm text-gray-500 mt-1">
+                Available: {selectedProductForQty.qty} {selectedProductForQty.unit || detectUnitFromName(selectedProductForQty.name)}
+              </p>
+              <p className="text-lg font-bold text-gray-900 mt-2">
+                ₨{formatCurrency(selectedProductForQty.saleRate)} per {selectedProductForQty.unit || detectUnitFromName(selectedProductForQty.name)}
+              </p>
+            </div>
+            
+            <div className="mb-6">
+              <label className="block text-sm font-semibold text-gray-700 mb-2">Enter Quantity</label>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    const step = showDecimalInput ? 0.5 : 1;
+                    const current = parseFloat(quantity);
+                    if (!isNaN(current) && current > (showDecimalInput ? 0.5 : 1)) {
+                      setQuantity((current - step).toString());
+                    } else if (current > 0) {
+                      setQuantity(showDecimalInput ? "0.5" : "1");
+                    }
+                  }}
+                  className="px-4 py-3 bg-gray-200 rounded-xl font-bold text-gray-700 hover:bg-gray-300"
+                >
+                  -{showDecimalInput ? "0.5" : "1"}
+                </button>
+                
+                <input
+                  type="number"
+                  step={showDecimalInput ? "0.1" : "1"}
+                  min={showDecimalInput ? 0.5 : 1}
+                  max={selectedProductForQty.qty}
+                  value={quantity}
+                  onChange={(e) => setQuantity(e.target.value)}
+                  className="flex-1 px-4 py-3 rounded-xl border border-gray-300 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 outline-none text-center text-lg font-semibold"
+                  autoFocus
+                />
+                
+                <button
+                  onClick={() => {
+                    const step = showDecimalInput ? 0.5 : 1;
+                    const current = parseFloat(quantity);
+                    if (!isNaN(current) && current + step <= selectedProductForQty.qty) {
+                      setQuantity((current + step).toString());
+                    } else if (!isNaN(current)) {
+                      setQuantity(selectedProductForQty.qty.toString());
+                    } else {
+                      setQuantity((showDecimalInput ? 1.0 : 1).toString());
+                    }
+                  }}
+                  className="px-4 py-3 bg-gray-200 rounded-xl font-bold text-gray-700 hover:bg-gray-300"
+                >
+                  +{showDecimalInput ? "0.5" : "1"}
+                </button>
+              </div>
+              
+              {/* Quick quantity buttons */}
+              <div className="grid grid-cols-5 gap-2 mt-3">
+                {showDecimalInput ? (
+                  [0.5, 1, 1.5, 2, 2.5].map(n => (
+                    <button
+                      key={n}
+                      onClick={() => setQuantity(n.toString())}
+                      className={`py-2 rounded-lg text-sm font-semibold transition-all ${
+                        parseFloat(quantity) === n
+                          ? 'bg-gray-900 text-white'
+                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                      }`}
+                    >
+                      {n}
+                    </button>
+                  ))
+                ) : (
+                  [1, 2, 3, 5, 10].map(n => (
+                    <button
+                      key={n}
+                      onClick={() => setQuantity(n.toString())}
+                      className={`py-2 rounded-lg text-sm font-semibold transition-all ${
+                        parseFloat(quantity) === n
+                          ? 'bg-gray-900 text-white'
+                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                      }`}
+                    >
+                      {n}
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+            
+            <div className="flex gap-3">
+              <button
+                onClick={() => setSelectedProductForQty(null)}
+                className="flex-1 py-3 rounded-xl border border-gray-300 text-gray-700 font-semibold hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  const qtyValue = parseFloat(quantity);
+                  if (!isNaN(qtyValue) && qtyValue > 0) {
+                    addToCartWithQuantity(selectedProductForQty, qtyValue);
+                  } else {
+                    showNotification("Invalid Quantity", "Please enter a valid quantity", "error");
+                  }
+                }}
+                className="flex-1 py-3 rounded-xl bg-gray-900 text-white font-semibold hover:bg-gray-800"
+              >
+                Add to Cart
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Toast Notification */}
       {showToast && (
@@ -663,7 +876,7 @@ export default function EmployeeDashboard() {
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           
-          {/* Products Section - Better scrolling performance */}
+          {/* Products Section */}
           <div className="lg:col-span-2 space-y-6">
             <div className="bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border border-gray-200/60 p-6">
               
@@ -681,7 +894,7 @@ export default function EmployeeDashboard() {
                 <div className="absolute right-4 top-1/2 -translate-y-1/2 text-xs text-gray-400 bg-gray-100 px-2 py-1 rounded-md">⌘K</div>
               </div>
 
-              {/* Category Filter - Horizontal scroll but better performance */}
+              {/* Category Filter */}
               {categories.length > 1 && (
                 <div className="mb-4 flex gap-2 overflow-x-auto pb-2 scrollbar-thin">
                   {categories.map(cat => (
@@ -698,7 +911,7 @@ export default function EmployeeDashboard() {
                 </div>
               )}
 
-              {/* Products Grid - OPTIMIZED SCROLLING */}
+              {/* Products Grid */}
               <div 
                 ref={productsGridRef}
                 className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[600px] overflow-y-auto pr-2 scrollbar-thin"
@@ -718,34 +931,42 @@ export default function EmployeeDashboard() {
                     <p className="text-gray-400 font-medium">No products found</p>
                   </div>
                 ) : (
-                  filteredProducts.map(product => (
-                    <div
-                      key={product.id}
-                      className={`p-4 rounded-xl border transition-all duration-300 ${
-                        product.qty === 0 || isProcessing
-                          ? 'bg-gray-100 border-gray-200 cursor-not-allowed opacity-50'
-                          : 'bg-white hover:bg-gray-50 border-gray-200 hover:border-gray-900 hover:shadow-lg'
-                      }`}
-                    >
-                      <div className="cursor-pointer" onClick={() => addToCart(product)}>
-                        <div className="font-semibold text-gray-900 mb-1 line-clamp-1">{product.name}</div>
-                        <div className="flex justify-between items-center">
-                          <span className="text-lg font-bold text-gray-900">₨{formatCurrency(product.saleRate)}</span>
-                          <span className="text-xs text-gray-500">Stock: {product.qty} {product.unit}</span>
-                        </div>
-                        {product.qty <= 5 && product.qty > 0 && (
-                          <div className="mt-2 text-xs text-orange-600 font-semibold">⚠️ Only {product.qty} left</div>
-                        )}
-                      </div>
-                      <button
-                        onClick={(e) => quickAddToCart(product, e)}
-                        disabled={product.qty === 0 || isProcessing}
-                        className="mt-3 w-full bg-gray-900 hover:bg-gray-800 text-white py-2 rounded-lg text-sm font-semibold transition-all disabled:opacity-50"
+                  filteredProducts.map(product => {
+                    const unit = product.unit || detectUnitFromName(product.name);
+                    const isDecimal = isDecimalUnit(unit);
+                    
+                    return (
+                      <div
+                        key={product.id}
+                        className={`p-4 rounded-xl border transition-all duration-300 ${
+                          product.qty === 0 || isProcessing
+                            ? 'bg-gray-100 border-gray-200 cursor-not-allowed opacity-50'
+                            : 'bg-white hover:bg-gray-50 border-gray-200 hover:border-gray-900 hover:shadow-lg'
+                        }`}
                       >
-                        + Add to Cart
-                      </button>
-                    </div>
-                  ))
+                        <div className="cursor-pointer" onClick={(e) => directAddToCart(product, e)}>
+                          <div className="font-semibold text-gray-900 mb-1 line-clamp-1">{product.name}</div>
+                          <div className="flex justify-between items-center">
+                            <span className="text-lg font-bold text-gray-900">₨{formatCurrency(product.saleRate)}</span>
+                            <span className="text-xs text-gray-500">Stock: {product.qty} {unit}</span>
+                          </div>
+                          {product.qty <= 5 && product.qty > 0 && (
+                            <div className="mt-2 text-xs text-orange-600 font-semibold">⚠️ Only {product.qty} left</div>
+                          )}
+                          {isDecimal && (
+                            <div className="mt-1 text-xs text-blue-600 font-semibold">💧 Decimal quantity supported</div>
+                          )}
+                        </div>
+                        <button
+                          onClick={(e) => directAddToCart(product, e)}
+                          disabled={product.qty === 0 || isProcessing}
+                          className="mt-3 w-full bg-gray-900 hover:bg-gray-800 text-white py-2 rounded-lg text-sm font-semibold transition-all disabled:opacity-50"
+                        >
+                          {isDecimal ? `🔢 Select Quantity` : `+ Add to Cart`}
+                        </button>
+                      </div>
+                    );
+                  })
                 )}
               </div>
             </div>
@@ -796,7 +1017,7 @@ export default function EmployeeDashboard() {
                 </div>
               )}
 
-              {/* Cart Items - OPTIMIZED SCROLLING */}
+              {/* Cart Items */}
               <div 
                 className="space-y-3 max-h-[300px] overflow-y-auto pr-2 mb-4 scrollbar-thin"
                 style={{ WebkitOverflowScrolling: 'touch' }}
@@ -809,20 +1030,36 @@ export default function EmployeeDashboard() {
                 ) : (
                   cart.map(item => {
                     const product = products.find(p => p.id === item.id);
+                    const unit = item.unit;
+                    const isDecimal = isDecimalUnit(unit);
+                    const step = isDecimal ? 0.5 : 1;
+                    
                     return (
                       <div key={item.id} className="bg-gray-50 p-3 rounded-xl border border-gray-200">
                         <div className="flex justify-between items-start mb-2">
                           <div>
                             <div className="font-semibold text-gray-900 line-clamp-1">{item.name}</div>
-                            <div className="text-xs text-gray-500">{item.unit}</div>
+                            <div className="text-xs text-gray-500">{unit}</div>
                           </div>
                           <button onClick={() => removeFromCart(item.id)} disabled={isProcessing} className="text-red-500 hover:text-red-700">✕</button>
                         </div>
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2">
-                            <button onClick={() => updateCartQty(item.id, item.qty - 1)} disabled={isProcessing} className="w-8 h-8 bg-gray-200 rounded-lg hover:bg-gray-300 flex items-center justify-center font-bold disabled:opacity-50">-</button>
-                            <span className="font-semibold w-8 text-center">{item.qty}</span>
-                            <button onClick={() => updateCartQty(item.id, item.qty + 1)} disabled={isProcessing || (product && item.qty >= product.qty)} className="w-8 h-8 bg-gray-200 rounded-lg hover:bg-gray-300 flex items-center justify-center font-bold disabled:opacity-50">+</button>
+                            <button 
+                              onClick={() => updateCartQty(item.id, parseFloat((item.qty - step).toFixed(2)))} 
+                              disabled={isProcessing || item.qty <= (isDecimal ? 0.5 : 1)} 
+                              className="w-8 h-8 bg-gray-200 rounded-lg hover:bg-gray-300 flex items-center justify-center font-bold disabled:opacity-50"
+                            >
+                              -
+                            </button>
+                            <span className="font-semibold w-12 text-center">{item.qty}</span>
+                            <button 
+                              onClick={() => updateCartQty(item.id, parseFloat((item.qty + step).toFixed(2)))} 
+                              disabled={isProcessing || (product && item.qty >= product.qty)} 
+                              className="w-8 h-8 bg-gray-200 rounded-lg hover:bg-gray-300 flex items-center justify-center font-bold disabled:opacity-50"
+                            >
+                              +
+                            </button>
                           </div>
                           <span className="font-bold text-gray-900">₨{formatCurrency(item.price * item.qty)}</span>
                         </div>
@@ -897,8 +1134,18 @@ export default function EmployeeDashboard() {
           from { transform: translateY(100%); opacity: 0; }
           to { transform: translateY(0); opacity: 1; }
         }
+        @keyframes fade-in {
+          from { opacity: 0; transform: scale(0.95); }
+          to { opacity: 1; transform: scale(1); }
+        }
+        @keyframes zoom-in {
+          from { transform: scale(0.95); opacity: 0; }
+          to { transform: scale(1); opacity: 1; }
+        }
         .animate-slide-in { animation: slide-in 0.3s ease-out; }
         .animate-in.slide-in-from-bottom-5 { animation: slide-in-from-bottom-5 0.3s ease-out; }
+        .fade-in { animation: fade-in 0.2s ease-out; }
+        .zoom-in { animation: zoom-in 0.2s ease-out; }
         
         .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
         .scrollbar-thin::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 10px; }

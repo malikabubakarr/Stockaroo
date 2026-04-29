@@ -120,8 +120,101 @@ interface OfflineSale {
 }
 
 // Units that support decimal quantities
-const DECIMAL_UNITS = ["liter", "L", "ml", "ML", "Kg", "kg", "gram", "g", "G"];
-const isDecimalUnit = (unit: string) => DECIMAL_UNITS.some(u => u.toLowerCase() === unit?.toLowerCase());
+const DECIMAL_UNITS = ["liter", "l", "ml", "mg", "kg", "g", "gram"];
+const isDecimalUnit = (unit: string) => {
+  if (!unit) return false;
+  return DECIMAL_UNITS.some(u => unit.toLowerCase().includes(u.toLowerCase()));
+};
+
+// Helper function to detect unit from product name
+const detectUnitFromName = (name: string): string => {
+  const lowerName = name.toLowerCase();
+  if (lowerName.includes("mg")) return "mg";
+  if (lowerName.includes("ml")) return "ml";
+  if (lowerName.includes("liter")) return "liter";
+  if (lowerName.includes("kg")) return "kg";
+  if (lowerName.includes("gram")) return "g";
+  return "pcs";
+};
+
+// Helper function to highlight matching text
+const highlightMatch = (text: string, search: string) => {
+  if (!search || !text || search.trim() === "") return text;
+  const searchTerm = search.trim().toLowerCase();
+  const normalizedText = text.toLowerCase();
+  const index = normalizedText.indexOf(searchTerm);
+  if (index === -1) return text;
+  
+  return (
+    <>
+      {text.substring(0, index)}
+      <span className="bg-yellow-200 text-gray-900 font-bold">{text.substring(index, index + searchTerm.length)}</span>
+      {text.substring(index + searchTerm.length)}
+    </>
+  );
+};
+
+// 🔥 CORE SCORING FUNCTION (Hybrid Fuzzy + Prefix Search)
+const calculateSearchScore = (
+  name: string, 
+  query: string, 
+  queryWords: string[], 
+  barcode: string
+): number => {
+  if (!query) return 0;
+  
+  const normalizedName = name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const normalizedQuery = query.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  
+  let score = 0;
+  
+  // 1. BARCODE MATCH (95-100) - Instant priority
+  if (barcode && barcode.toLowerCase().includes(normalizedQuery)) {
+    score = 100;
+  }
+  
+  // 2. EXACT MATCH (95)
+  if (normalizedName === normalizedQuery) score = Math.max(score, 95);
+  
+  // 3. PREFIX MATCH (80-90) - "mil" → Milk
+  if (normalizedName.startsWith(normalizedQuery)) score = Math.max(score, 85);
+  
+  // 4. camelCase/TitleCase Prefix (75) - "iP" → iPhone
+  if (/[A-Z]/.test(name) && normalizedName.startsWith(normalizedQuery.replace(/[^a-z]/g, ''))) {
+    score = Math.max(score, 75);
+  }
+  
+  // 5. WHOLE WORD MATCH (70-80)
+  queryWords.forEach(word => {
+    if (normalizedName.includes(` ${word} `) || 
+        normalizedName.startsWith(`${word} `) || 
+        normalizedName.endsWith(` ${word}`)) {
+      score = Math.max(score, 80);
+    }
+  });
+  
+  // 6. CONTAINS MATCH (50-70)
+  if (normalizedName.includes(normalizedQuery)) {
+    score = Math.max(score, 60);
+  }
+  
+  // 7. MULTI-WORD FUZZY (30-55)
+  let wordMatches = 0;
+  queryWords.forEach(word => {
+    if (normalizedName.includes(word)) wordMatches++;
+  });
+  if (wordMatches > 0) {
+    score = Math.max(score, 30 + (wordMatches * 10));
+  }
+  
+  // 8. FIRST LETTERS MATCH (40) - "ab" → Apple Banana
+  if (queryWords.length > 1) {
+    const firstLetters = queryWords.map(w => w[0]).join('');
+    if (normalizedName.includes(firstLetters)) score = Math.max(score, 40);
+  }
+  
+  return Math.min(100, score);
+};
 
 // Offline Banner Component
 const OfflineBanner = ({ isOffline, isSlowConnection }: { isOffline: boolean; isSlowConnection: boolean }) => {
@@ -335,9 +428,11 @@ export default function Sales() {
 
   // Update showDecimalInput when product changes
   useEffect(() => {
-    if (selectedProduct?.unit) {
-      setShowDecimalInput(isDecimalUnit(selectedProduct.unit));
-      if (isDecimalUnit(selectedProduct.unit)) {
+    if (selectedProduct) {
+      const unit = selectedProduct.unit || detectUnitFromName(selectedProduct.name);
+      const isDecimal = isDecimalUnit(unit);
+      setShowDecimalInput(isDecimal);
+      if (isDecimal) {
         setQty("1.0");
       } else {
         setQty("1");
@@ -529,7 +624,7 @@ export default function Sales() {
     };
   }, []);
 
-  // Load products with cache
+  // Load products with cache and auto-detect units
   useEffect(() => {
     if (!activeBranch?.id || !ownerId || isLoading) return;
 
@@ -539,20 +634,28 @@ export default function Sales() {
     const q = query(productsRef, where("branchId", "==", activeBranch.id));
 
     const unsub = onSnapshot(q, (snap) => {
-      const list: Product[] = snap.docs.map((d) => ({
-        id: d.id,
-        name: d.data().name,
-        barcode: d.data().barcode || '',
-        qty: d.data().qty,
-        saleRate: d.data().saleRate,
-        originalSaleRate: d.data().originalSaleRate || d.data().saleRate,
-        profit: d.data().profit,
-        originalProfit: d.data().originalProfit || d.data().profit,
-        purchaseRate: d.data().purchaseRate,
-        originalPurchaseRate: d.data().originalPurchaseRate || d.data().purchaseRate,
-        allowSale: d.data().allowSale,
-        unit: d.data().unit || "pcs",
-      }));
+      const list: Product[] = snap.docs.map((d) => {
+        const data = d.data();
+        let unit = data.unit;
+        if (!unit) {
+          unit = detectUnitFromName(data.name);
+        }
+        
+        return {
+          id: d.id,
+          name: data.name,
+          barcode: data.barcode || '',
+          qty: data.qty,
+          saleRate: data.saleRate,
+          originalSaleRate: data.originalSaleRate || data.saleRate,
+          profit: data.profit,
+          originalProfit: data.originalProfit || data.profit,
+          purchaseRate: data.purchaseRate,
+          originalPurchaseRate: data.originalPurchaseRate || data.purchaseRate,
+          allowSale: data.allowSale,
+          unit: unit,
+        };
+      });
       setProducts(list);
       cacheProducts(list);
     }, (error) => {
@@ -647,7 +750,8 @@ export default function Sales() {
         setSearchTerm(product.name);
         setDebouncedSearch(product.name);
         
-        const defaultQty = isDecimalUnit(product.unit || "") ? 1.0 : 1;
+        const isDecimal = isDecimalUnit(product.unit || detectUnitFromName(product.name));
+        const defaultQty = isDecimal ? 1.0 : 1;
         addToCartWithQuantity(product, defaultQty);
       } else {
         playBeep("error");
@@ -748,18 +852,23 @@ export default function Sales() {
     setCameraError("");
   };
 
-  // Search results
+  // 🔥 HYBRID FUZZY + PREFIX SEARCH RESULTS
   const searchResults = useMemo(() => {
-    if (!debouncedSearch || debouncedSearch.trim() === "") return [];
-    const searchLower = debouncedSearch.toLowerCase();
+    if (!debouncedSearch?.trim()) return [];
+
+    const query = debouncedSearch.trim().toLowerCase();
+    const queryWords = query.split(/\s+/).filter(Boolean);
+    
     return products
-      .filter(p => 
-        p.name.toLowerCase().includes(searchLower) || 
-        (p.barcode && p.barcode.includes(debouncedSearch)) ||
-        p.id === debouncedSearch
-      )
-      .filter(p => p.allowSale)
-      .slice(0, 10);
+      .filter(p => p.allowSale && p.qty > 0)
+      .map(product => {
+        const score = calculateSearchScore(product.name, query, queryWords, product.barcode || '');
+        return { product, score };
+      })
+      .filter(({ score }) => score >= 25) // Minimum relevance threshold
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 12)
+      .map(({ product }) => product);
   }, [products, debouncedSearch]);
 
   // Handle product select
@@ -788,15 +897,16 @@ export default function Sales() {
       return;
     }
 
-    const isDecimal = isDecimalUnit(product.unit || "");
+    const unit = product.unit || detectUnitFromName(product.name);
+    const isDecimal = isDecimalUnit(unit);
     
     if (!isDecimal && !Number.isInteger(quantity)) {
-      showToast("error", "Invalid Quantity", `${product.unit} products must be whole numbers`);
+      showToast("error", "Invalid Quantity", `${unit} products must be whole numbers`);
       return;
     }
 
     if (quantity > product.qty) {
-      showToast("error", "Stock Limit", `Maximum available stock: ${product.qty} ${product.unit}`);
+      showToast("error", "Stock Limit", `Maximum available stock: ${product.qty} ${unit}`);
       return;
     }
 
@@ -819,12 +929,12 @@ export default function Sales() {
           showToast("error", "Stock Limit", `Cannot exceed stock: ${product.qty}`);
           return prev;
         }
-        showToast("success", "Cart Updated", `${quantity} ${product.unit} more ${product.name} added to cart`);
+        showToast("success", "Cart Updated", `${quantity} ${unit} more ${product.name} added to cart`);
         return prev.map((c) =>
           c.id === product.id ? { ...c, qty: parseFloat(newQty.toFixed(2)) } : c
         );
       }
-      showToast("success", "Item Added", `${product.name} (${quantity} ${product.unit}) added to cart`);
+      showToast("success", "Item Added", `${product.name} (${quantity} ${unit}) added to cart`);
       return [...prev, { 
         id: product.id, 
         name: product.name, 
@@ -836,7 +946,7 @@ export default function Sales() {
         originalProfit: product.profit,
         effectivePrice: product.saleRate,
         effectiveProfit: product.profit,
-        unit: product.unit,
+        unit: unit,
       }];
     });
 
@@ -887,14 +997,15 @@ export default function Sales() {
       return;
     }
     
-    const isDecimal = isDecimalUnit(product.unit || "");
+    const unit = product.unit || detectUnitFromName(product.name);
+    const isDecimal = isDecimalUnit(unit);
     if (!isDecimal && !Number.isInteger(newQty)) {
-      showToast('error', 'Invalid Quantity', `${product.unit} must be whole numbers`);
+      showToast('error', 'Invalid Quantity', `${unit} must be whole numbers`);
       return;
     }
     
     if (newQty > product.qty) {
-      showToast('error', 'Stock Limit', `Maximum available stock: ${product.qty} ${product.unit}`);
+      showToast('error', 'Stock Limit', `Maximum available stock: ${product.qty} ${unit}`);
       return;
     }
 
@@ -1293,25 +1404,79 @@ export default function Sales() {
                     {selectedProduct && <span className="px-2 py-1 bg-green-100 text-green-800 rounded-full text-xs font-semibold">Selected: {selectedProduct.name}</span>}
                   </label>
                   
-                  <input type="text" placeholder="Type product name or scan barcode..." className={`w-full px-5 py-4 rounded-2xl border-2 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/20 outline-none transition-all duration-300 text-lg font-semibold text-gray-900 placeholder-gray-400 ${isScanningInProgress ? 'border-green-400 bg-green-50 ring-2 ring-green-200/50' : 'border-gray-300 hover:border-gray-400'}`} value={searchTerm} onChange={(e) => { setSearchTerm(e.target.value); setSelectedProduct(null); }} onKeyDown={(e) => { if (e.key === 'Enter' && selectedProduct) addToCart(); }} autoFocus />
+                  <div className="relative">
+                    <input 
+                      type="text" 
+                      placeholder="Type product name or scan barcode..." 
+                      className={`w-full px-5 py-4 rounded-2xl border-2 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/20 outline-none transition-all duration-300 text-lg font-semibold text-gray-900 placeholder-gray-400 ${isScanningInProgress ? 'border-green-400 bg-green-50 ring-2 ring-green-200/50' : 'border-gray-300 hover:border-gray-400'}`} 
+                      value={searchTerm} 
+                      onChange={(e) => { 
+                        const value = e.target.value;
+                        setSearchTerm(value);
+                        setSelectedProduct(null);
+                        setDebouncedSearch(value);
+                      }} 
+                      onKeyDown={(e) => { 
+                        if (e.key === 'Enter' && selectedProduct) {
+                          addToCart();
+                        } else if (e.key === 'Enter' && searchResults.length > 0) {
+                          handleProductSelect(searchResults[0]);
+                          setTimeout(() => addToCart(), 100);
+                        }
+                      }} 
+                      autoFocus 
+                    />
+                    {searchTerm && (
+                      <button
+                        onClick={clearSearch}
+                        className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xl"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
                   
                   {debouncedSearch && searchResults.length > 0 && !selectedProduct && (
                     <div className="absolute z-50 w-full mt-2 bg-white rounded-xl shadow-2xl border border-gray-200 max-h-80 overflow-y-auto">
                       {searchResults.map(p => (
-                        <div key={p.id} className="p-4 hover:bg-gray-50 cursor-pointer border-b border-gray-100 last:border-0 transition-all duration-200" onClick={() => handleProductSelect(p)}>
+                        <div
+                          key={p.id}
+                          className="p-4 hover:bg-gray-50 cursor-pointer border-b border-gray-100 last:border-0 transition-all duration-200"
+                          onClick={() => handleProductSelect(p)}
+                        >
                           <div className="flex justify-between items-start">
                             <div className="flex-1">
-                              <div className="font-bold text-gray-900 text-lg">{p.name}</div>
+                              <div className="font-bold text-gray-900 text-lg">
+                                {highlightMatch(p.name, debouncedSearch)}
+                              </div>
                               <div className="text-sm text-gray-500 mt-1 flex flex-wrap gap-2">
                                 {p.barcode && <span className="bg-gray-100 px-2 py-0.5 rounded">📦 {p.barcode}</span>}
                                 <span>📊 Stock: {p.qty} {p.unit || 'pcs'}</span>
                                 <span>💰 {currency.symbol}{p.saleRate.toLocaleString()}</span>
+                                <span className={p.profit >= 0 ? 'text-green-600' : 'text-red-600'}>
+                                  Profit: {currency.symbol}{p.profit.toLocaleString()}
+                                </span>
                               </div>
                             </div>
-                            <button onClick={(e) => { e.stopPropagation(); handleProductSelect(p); setTimeout(() => addToCart(), 100); }} className="ml-3 px-4 py-2 bg-gradient-to-r from-emerald-500 to-emerald-600 text-white text-sm font-bold rounded-lg hover:shadow-lg transition-all">Add</button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleProductSelect(p);
+                                setTimeout(() => addToCart(), 100);
+                              }}
+                              className="ml-3 px-4 py-2 bg-gradient-to-r from-emerald-500 to-emerald-600 text-white text-sm font-bold rounded-lg hover:shadow-lg transition-all"
+                            >
+                              Add
+                            </button>
                           </div>
                         </div>
                       ))}
+                    </div>
+                  )}
+                  
+                  {debouncedSearch && searchResults.length === 0 && !selectedProduct && (
+                    <div className="absolute z-50 w-full mt-2 bg-white rounded-xl shadow-2xl border border-gray-200 p-4 text-center text-gray-500">
+                      No products found matching "{debouncedSearch}"
                     </div>
                   )}
                 </div>
@@ -1329,76 +1494,75 @@ export default function Sales() {
                   )}
                 </div>
 
-{/* Quantity Input - Responsive with Max below */}
-<div className="relative">
-  <label className="block text-sm font-semibold text-gray-700 mb-2">Quantity</label>
-  
-  {/* Controls row - responsive */}
-  <div className="flex gap-2">
-    <button
-      onClick={() => {
-        const currentQty = parseFloat(qty);
-        if (!isNaN(currentQty) && currentQty > (showDecimalInput ? 0.5 : 1)) {
-          const newQty = currentQty - (showDecimalInput ? 0.5 : 1);
-          setQty(newQty.toString());
-        } else if (currentQty > 0) {
-          setQty(showDecimalInput ? "0.5" : "1");
-        }
-      }}
-      disabled={!selectedProduct}
-      className="px-3 sm:px-5 py-3 bg-gray-200 rounded-xl font-bold text-gray-700 hover:bg-gray-300 transition-all disabled:opacity-50 active:scale-95 touch-manipulation"
-    >
-      -{showDecimalInput ? "0.5" : "1"}
-    </button>
-    
-    <input 
-      type="number" 
-      step={showDecimalInput ? "0.1" : "1"} 
-      min="0" 
-      value={qty} 
-      onChange={(e) => {
-        const val = e.target.value;
-        if (val === "") {
-          setQty("");
-        } else {
-          setQty(val);
-        }
-      }}
-      onBlur={() => {
-        if (qty === "" || qty === "0") {
-          setQty("1");
-        }
-      }}
-      className="flex-1 px-3 sm:px-4 py-3 rounded-xl border border-gray-300 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 outline-none text-base sm:text-lg font-semibold text-center" 
-      disabled={!selectedProduct} 
-    />
-    
-    <button
-      onClick={() => {
-        const currentQty = parseFloat(qty);
-        if (!isNaN(currentQty) && currentQty > 0) {
-          const newQty = currentQty + (showDecimalInput ? 0.5 : 1);
-          setQty(newQty.toString());
-        } else {
-          setQty(showDecimalInput ? "0.5" : "1");
-        }
-      }}
-      disabled={!selectedProduct}
-      className="px-3 sm:px-5 py-3 bg-gray-200 rounded-xl font-bold text-gray-700 hover:bg-gray-300 transition-all disabled:opacity-50 active:scale-95 touch-manipulation"
-    >
-      +{showDecimalInput ? "0.5" : "1"}
-    </button>
-  </div>
-  
-  {/* Max text - always below, responsive text size */}
-  {selectedProduct && selectedProduct.unit && (
-    <div className="mt-2 text-right">
-      <span className="text-xs sm:text-sm text-gray-500">
-        Max: {selectedProduct.qty} {selectedProduct.unit}
-      </span>
-    </div>
-  )}
-</div>
+                {/* Quantity Input */}
+                <div className="relative">
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Quantity</label>
+                  
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => {
+                        const currentQty = parseFloat(qty);
+                        if (!isNaN(currentQty) && currentQty > (showDecimalInput ? 0.5 : 1)) {
+                          const newQty = currentQty - (showDecimalInput ? 0.5 : 1);
+                          setQty(newQty.toString());
+                        } else if (currentQty > 0) {
+                          setQty(showDecimalInput ? "0.5" : "1");
+                        }
+                      }}
+                      disabled={!selectedProduct}
+                      className="px-3 sm:px-5 py-3 bg-gray-200 rounded-xl font-bold text-gray-700 hover:bg-gray-300 transition-all disabled:opacity-50 active:scale-95 touch-manipulation"
+                    >
+                      -{showDecimalInput ? "0.5" : "1"}
+                    </button>
+                    
+                    <input 
+                      type="number" 
+                      step={showDecimalInput ? "0.1" : "1"} 
+                      min="0" 
+                      value={qty} 
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (val === "") {
+                          setQty("");
+                        } else {
+                          setQty(val);
+                        }
+                      }}
+                      onBlur={() => {
+                        if (qty === "" || qty === "0") {
+                          setQty("1");
+                        }
+                      }}
+                      className="flex-1 px-3 sm:px-4 py-3 rounded-xl border border-gray-300 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/20 outline-none text-base sm:text-lg font-semibold text-center" 
+                      disabled={!selectedProduct} 
+                    />
+                    
+                    <button
+                      onClick={() => {
+                        const currentQty = parseFloat(qty);
+                        if (!isNaN(currentQty) && currentQty > 0) {
+                          const newQty = currentQty + (showDecimalInput ? 0.5 : 1);
+                          setQty(newQty.toString());
+                        } else {
+                          setQty(showDecimalInput ? "0.5" : "1");
+                        }
+                      }}
+                      disabled={!selectedProduct}
+                      className="px-3 sm:px-5 py-3 bg-gray-200 rounded-xl font-bold text-gray-700 hover:bg-gray-300 transition-all disabled:opacity-50 active:scale-95 touch-manipulation"
+                    >
+                      +{showDecimalInput ? "0.5" : "1"}
+                    </button>
+                  </div>
+                  
+                  {selectedProduct && selectedProduct.unit && (
+                    <div className="mt-2 text-right">
+                      <span className="text-xs sm:text-sm text-gray-500">
+                        Max: {selectedProduct.qty} {selectedProduct.unit}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
                 <div className="grid md:grid-cols-2 gap-3">
                   <button onClick={startCameraScan} disabled={isCameraActive} className={`w-full p-4 rounded-2xl font-bold text-lg shadow-xl transition-all duration-300 flex items-center justify-center gap-3 ${isCameraActive ? 'bg-gray-400 text-gray-600 cursor-not-allowed' : 'bg-gradient-to-r from-purple-500 to-pink-600 hover:from-purple-600 hover:to-pink-700 text-white hover:shadow-2xl hover:scale-[1.02]'}`}>
                     {isCameraActive ? (<><div className="w-6 h-6 border-2 border-white border-t-transparent rounded-full animate-spin"></div>Scanning...</>) : (<><span>📷</span> <span>Scan Barcode</span></>)}
@@ -1423,105 +1587,104 @@ export default function Sales() {
                 )}
               </div>
             </div>
-            </div>
 
-{/* Cart Section - FIXED WITH PROPER SPACING */}
-<div className="bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border border-gray-200/60 p-6">
-  <div className="flex justify-between items-center mb-4">
-    <h2 className="text-xl font-bold text-gray-900">Current Cart</h2>
-    <span className="bg-gray-900 text-white px-3 py-1 rounded-full text-sm font-semibold">{cart.length} items</span>
-  </div>
+            {/* Cart Section */}
+            <div className="bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border border-gray-200/60 p-6">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-xl font-bold text-gray-900">Current Cart</h2>
+                <span className="bg-gray-900 text-white px-3 py-1 rounded-full text-sm font-semibold">{cart.length} items</span>
+              </div>
 
-  {cart.length === 0 ? (
-    <div className="text-center py-12">
-      <div className="text-6xl mb-4">🛒</div>
-      <p className="text-gray-400 font-medium">Cart is empty</p>
-      <p className="text-sm text-gray-400 mt-2">Search for products or scan barcodes to add items!</p>
-    </div>
-  ) : (
-    <div className="space-y-4 max-h-96 overflow-y-auto pr-2">
-      {cart.map((c) => {
-        const productUnit = c.unit || "pcs";
-        const isDecimal = isDecimalUnit(productUnit);
-        const step = isDecimal ? 0.5 : 1;
-        const minQty = isDecimal ? 0.5 : 1;
-        
-        return (
-          <div key={c.id} className="bg-gray-50 p-4 rounded-xl border border-gray-200 hover:border-gray-300 transition-all duration-300">
-            {/* Product Info */}
-            <div className="mb-3">
-              <div className="font-semibold text-gray-900 text-base">{c.name}</div>
-              <div className="text-sm text-gray-600 mt-1 flex flex-wrap items-center gap-1">
-                <span className="font-medium">{currency.symbol}{c.price.toLocaleString()}</span>
-                <span>×</span>
-                <span className="font-medium">{c.qty} {productUnit}</span>
-                <span>=</span>
-                <span className="font-bold text-gray-900">{currency.symbol}{formatCurrency(c.price * c.qty)}</span>
-              </div>
-              <div className="text-xs text-green-600 mt-1">
-                Profit: {currency.symbol}{formatCurrency(c.profit * c.qty)}
-              </div>
-            </div>
-            
-            {/* Controls Row - Separated */}
-            <div className="flex items-center justify-between gap-4 pt-2 border-t border-gray-200">
-              {/* Quantity Controls */}
-              <div className="flex items-center gap-2 bg-white rounded-lg border border-gray-200 p-1 shadow-sm">
-                <button
-                  onClick={() => {
-                    const newQty = Math.max(minQty, c.qty - step);
-                    updateCartQty(c.id, parseFloat(newQty.toFixed(2)));
-                  }}
-                  disabled={isProcessing || c.qty <= minQty}
-                  className="w-10 h-10 bg-gray-100 hover:bg-gray-200 rounded-lg flex items-center justify-center font-bold text-xl disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                >
-                  −
-                </button>
-                
-                <input 
-                  type="number" 
-                  step={step}
-                  min={minQty}
-                  value={c.qty} 
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    if (val === "") return;
-                    const numVal = parseFloat(val);
-                    if (!isNaN(numVal) && numVal >= minQty) {
-                      updateCartQty(c.id, numVal);
-                    }
-                  }}
-                  className="w-16 text-center border-0 focus:ring-0 text-lg font-semibold bg-transparent [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                  disabled={isProcessing}
-                />
-                
-                <button
-                  onClick={() => {
-                    const newQty = c.qty + step;
-                    updateCartQty(c.id, parseFloat(newQty.toFixed(2)));
-                  }}
-                  disabled={isProcessing}
-                  className="w-10 h-10 bg-gray-100 hover:bg-gray-200 rounded-lg flex items-center justify-center font-bold text-xl disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                >
-                  +
-                </button>
-              </div>
-              
-              {/* Remove Button */}
-              <button 
-                onClick={() => removeFromCart(c.id)} 
-                disabled={isProcessing} 
-                className="bg-red-100 hover:bg-red-200 text-red-600 px-4 py-2 rounded-lg font-medium transition-colors disabled:opacity-50"
-              >
-                Remove
-              </button>
+              {cart.length === 0 ? (
+                <div className="text-center py-12">
+                  <div className="text-6xl mb-4">🛒</div>
+                  <p className="text-gray-400 font-medium">Cart is empty</p>
+                  <p className="text-sm text-gray-400 mt-2">Search for products or scan barcodes to add items!</p>
+                </div>
+              ) : (
+                <div className="space-y-4 max-h-96 overflow-y-auto pr-2">
+                  {cart.map((c) => {
+                    const productUnit = c.unit || "pcs";
+                    const isDecimal = isDecimalUnit(productUnit);
+                    const step = isDecimal ? 0.5 : 1;
+                    const minQty = isDecimal ? 0.5 : 1;
+                    
+                    return (
+                      <div key={c.id} className="bg-gray-50 p-4 rounded-xl border border-gray-200 hover:border-gray-300 transition-all duration-300">
+                        {/* Product Info */}
+                        <div className="mb-3">
+                          <div className="font-semibold text-gray-900 text-base">{c.name}</div>
+                          <div className="text-sm text-gray-600 mt-1 flex flex-wrap items-center gap-1">
+                            <span className="font-medium">{currency.symbol}{c.price.toLocaleString()}</span>
+                            <span>×</span>
+                            <span className="font-medium">{c.qty} {productUnit}</span>
+                            <span>=</span>
+                            <span className="font-bold text-gray-900">{currency.symbol}{formatCurrency(c.price * c.qty)}</span>
+                          </div>
+                          <div className="text-xs text-green-600 mt-1">
+                            Profit: {currency.symbol}{formatCurrency(c.profit * c.qty)}
+                          </div>
+                        </div>
+                        
+                        {/* Controls Row */}
+                        <div className="flex items-center justify-between gap-4 pt-2 border-t border-gray-200">
+                          <div className="flex items-center gap-2 bg-white rounded-lg border border-gray-200 p-1 shadow-sm">
+                            <button
+                              onClick={() => {
+                                const newQty = Math.max(minQty, c.qty - step);
+                                updateCartQty(c.id, parseFloat(newQty.toFixed(2)));
+                              }}
+                              disabled={isProcessing || c.qty <= minQty}
+                              className="w-10 h-10 bg-gray-100 hover:bg-gray-200 rounded-lg flex items-center justify-center font-bold text-xl disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                            >
+                              −
+                            </button>
+                            
+                            <input 
+                              type="number" 
+                              step={step}
+                              min={minQty}
+                              value={c.qty} 
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                if (val === "") return;
+                                const numVal = parseFloat(val);
+                                if (!isNaN(numVal) && numVal >= minQty) {
+                                  updateCartQty(c.id, numVal);
+                                }
+                              }}
+                              className="w-16 text-center border-0 focus:ring-0 text-lg font-semibold bg-transparent [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                              disabled={isProcessing}
+                            />
+                            
+                            <button
+                              onClick={() => {
+                                const newQty = c.qty + step;
+                                updateCartQty(c.id, parseFloat(newQty.toFixed(2)));
+                              }}
+                              disabled={isProcessing}
+                              className="w-10 h-10 bg-gray-100 hover:bg-gray-200 rounded-lg flex items-center justify-center font-bold text-xl disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                            >
+                              +
+                            </button>
+                          </div>
+                          
+                          <button 
+                            onClick={() => removeFromCart(c.id)} 
+                            disabled={isProcessing} 
+                            className="bg-red-100 hover:bg-red-200 text-red-600 px-4 py-2 rounded-lg font-medium transition-colors disabled:opacity-50"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
-        );
-      })}
-    </div>
-  )}
-</div>
+
           {/* Right Column */}
           <div className="space-y-6">
             <div className="bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border border-gray-200/60 p-6">
