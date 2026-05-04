@@ -15,5 +15,27 @@ export const addEmployee = async (name: string, email: string, password: string,
     branchId: branchId,
   });
 
+  // 🚀 NEW: Auto-create 12hr session for new employee (optional)
+  createPOSSessionForEmployee(uid, name, branchId);
+
   alert("Employee added successfully!");
+};
+
+// 🚀 NEW: Helper for employee sessions (matches auth.ts)
+const createPOSSessionForEmployee = (uid: string, name: string, branchId: string) => {
+  const SESSION_KEY = "pos_session_12hr";
+  const SESSION_DURATION = 12 * 60 * 60 * 1000;
+  
+  const session = {
+    uid,
+    role: "employee",
+    branchId,
+    name,
+    startTime: Date.now(),
+    expiresAt: Date.now() + SESSION_DURATION,
+    lastActivity: Date.now()
+  };
+  
+  localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  console.log("✅ Employee 12hr session auto-created");
 };

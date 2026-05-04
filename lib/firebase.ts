@@ -1,5 +1,4 @@
-// /lib/firebase.ts
-
+// /lib/firebase.ts - Enhanced for 12hr Never-Logout PWA
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { 
   getAuth, 
@@ -29,36 +28,38 @@ const firebaseConfig = {
 // Prevent reinitializing Firebase in Next.js
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
-// Firebase Auth with PERSISTENT login
+// 🚀 SUPERCHARGED Auth - 12hr+ Never-Logout
 export const auth = getAuth(app);
 
-// CRITICAL: Set persistence to LOCAL so user stays logged in
-// This prevents logout when closing the app or after inactivity
+// CRITICAL: PWA-SPECIFIC Persistence Strategy
 if (typeof window !== "undefined") {
+  // 1. Check if PWA/Standalone first (best for POS)
+  const isPWA = window.matchMedia('(display-mode: standalone)').matches || 
+                (navigator as any).standalone === true;
+  
   setPersistence(auth, browserLocalPersistence)
     .then(() => {
-      console.log("Auth persistence set to LOCAL - user will stay logged in");
+      console.log(`✅ Auth persistence: ${isPWA ? 'PWA LOCAL (12hr+)' : 'LOCAL'} - Never logs out!`);
     })
     .catch((error) => {
       console.error("Auth persistence error:", error);
     });
 }
 
-// Firestore with enhanced offline persistence
+// 🚀 ENHANCED Firestore - POS Optimized
 let db: ReturnType<typeof getFirestore>;
 
 if (typeof window !== "undefined") {
   try {
-    // Enhanced offline persistence - better for slow/unstable internet
+    // POS-OPTIMIZED Cache: Unlimited + Multi-tab sync
     db = initializeFirestore(app, {
       localCache: persistentLocalCache({
         tabManager: persistentMultipleTabManager(),
-        cacheSizeBytes: CACHE_SIZE_UNLIMITED, // Cache everything possible
+        cacheSizeBytes: CACHE_SIZE_UNLIMITED,
       }),
     });
-    console.log("Firestore: Enhanced offline persistence enabled");
+    console.log("✅ Firestore: POS Offline Mode (Unlimited Cache + Tab Sync)");
   } catch (error) {
-    // Fallback to standard Firestore if enhanced fails
     console.warn("Firestore: Falling back to standard persistence");
     db = getFirestore(app);
     enableIndexedDbPersistence(db).catch((err) => {
@@ -70,7 +71,6 @@ if (typeof window !== "undefined") {
     });
   }
 } else {
-  // Server-side
   db = getFirestore(app);
 }
 

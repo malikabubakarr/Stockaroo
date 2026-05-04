@@ -8,6 +8,7 @@ import { doc, getDoc, collection, onSnapshot, query, where, orderBy, writeBatch,
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
+import { restorePOSSession, extendPOSSession } from "@/lib/auth"; // 🚀 ADD THESE IMPORTS
 
 // Debug mode - set to false in production
 const DEBUG = false;
@@ -38,6 +39,26 @@ interface CurrencyOption {
   name: string;
   flag: string;
 }
+
+// Offline Banner Component
+const OfflineBanner = memo(({ isOffline }: { isOffline: boolean }) => {
+  if (!isOffline) return null;
+  
+  return (
+    <div className="fixed bottom-4 left-4 right-4 z-50 bg-red-600/95 backdrop-blur-lg rounded-xl p-4 shadow-2xl animate-in slide-in-from-bottom-5">
+      <div className="flex items-center gap-3">
+        <span className="text-2xl">📡</span>
+        <div className="flex-1">
+          <p className="text-white font-bold text-sm">You are offline</p>
+          <p className="text-white/80 text-xs">Viewing cached data. Changes will sync when connection returns.</p>
+        </div>
+        <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>
+      </div>
+    </div>
+  );
+});
+
+OfflineBanner.displayName = 'OfflineBanner';
 
 // Debounce utility
 const debounce = <T extends (...args: any[]) => any>(
@@ -205,6 +226,7 @@ export default function OwnerDashboard() {
   // Refs
   const statsCacheRef = useRef<Stats | null>(null);
   const unsubscribeRefs = useRef<(() => void)[]>([]);
+  const tokenRefreshInterval = useRef<NodeJS.Timeout | null>(null);
 
   // Currency list
   const currencies: CurrencyOption[] = useMemo(() => [
@@ -242,6 +264,12 @@ export default function OwnerDashboard() {
   /* ---------------- LOGOUT FUNCTION ---------------- */
   const handleLogout = async () => {
     try {
+      // Clear token refresh interval
+      if (tokenRefreshInterval.current) {
+        clearInterval(tokenRefreshInterval.current);
+        tokenRefreshInterval.current = null;
+      }
+      
       unsubscribeRefs.current.forEach(unsubscribe => unsubscribe());
       unsubscribeRefs.current = [];
       
@@ -251,6 +279,7 @@ export default function OwnerDashboard() {
       localStorage.removeItem("lastLoggedIn");
       localStorage.removeItem("userRole");
       localStorage.removeItem("currency");
+      localStorage.removeItem("pos_session"); // Clear 12hr session
       
       await signOut(auth);
       router.push("/login");
@@ -258,6 +287,44 @@ export default function OwnerDashboard() {
       console.error("Error logging out:", error);
     }
   };
+
+  /* ---------------- TOKEN REFRESH KEEP ALIVE ---------------- */
+  useEffect(() => {
+    const refreshToken = async () => {
+      const user = auth.currentUser;
+      if (user) {
+        try {
+          await user.getIdToken(true);
+          if (DEBUG) console.log("✅ Token auto-refreshed");
+        } catch (error) {
+          console.error("❌ Token refresh failed:", error);
+        }
+      }
+    };
+
+    // Refresh token every 25 minutes (before 1 hour expiry)
+    tokenRefreshInterval.current = setInterval(refreshToken, 25 * 60 * 1000);
+    
+    // Also refresh when page becomes visible again
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshToken();
+      }
+    };
+    
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    
+    // Refresh when coming back online
+    window.addEventListener('online', refreshToken);
+
+    return () => {
+      if (tokenRefreshInterval.current) {
+        clearInterval(tokenRefreshInterval.current);
+      }
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('online', refreshToken);
+    };
+  }, []);
 
   /* ---------------- ONLINE / OFFLINE DETECTION ---------------- */
   useEffect(() => {
@@ -281,12 +348,17 @@ export default function OwnerDashboard() {
     
     setRefreshingStats(true);
     
+    // Force refresh token as well
+    if (auth.currentUser) {
+      auth.currentUser.getIdToken(true).catch(console.error);
+    }
+    
     setTimeout(() => {
       setRefreshingStats(false);
     }, 2000);
   }, [activeBranch?.id, currentUser?.uid, refreshingStats]);
 
-  /* ---------------- AUTH + DATA LOAD WITH CACHE ---------------- */
+  /* ---------------- 🚀 UPDATED AUTH + DATA LOAD WITH 12HR SESSION ---------------- */
   useEffect(() => {
     const cachedBranches = localStorage.getItem("branches_cache");
     if (cachedBranches) {
@@ -321,91 +393,118 @@ export default function OwnerDashboard() {
       }
     }
 
-    const unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
-      if (!user) {
-        setCurrentUser(null);
-        router.push("/login");
-        setIsAuthInitialized(true);
-        return;
+    let logoutTimeout: NodeJS.Timeout;
+    let unsubscribeAuth: () => void;
+
+    const checkAuth = async () => {
+      // 🚀 NEW: 12hr Session Check FIRST (instant!)
+      const session = restorePOSSession();
+      if (session) {
+        extendPOSSession(); // Keep 12hr session alive
+        // Note: We still need to verify with Firebase, but this provides instant UI
       }
 
-      if (!currentUser || currentUser.uid !== user.uid) {
-        setCurrentUser(user);
-      }
-      
-      const ownerId = user.uid;
-
-      try {
-        const userDocRef = doc(db, "users", ownerId);
-        const userSnap = await getDoc(userDocRef);
-
-        if (userSnap.exists()) {
-          const userData = userSnap.data();
-          setOwnerName(userData.name || "Owner");
+      // 🚀 YOUR ORIGINAL CODE (with session extension)
+      unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
+        if (!user) {
+          if (logoutTimeout) clearTimeout(logoutTimeout);
           
-          if (userData.currency) {
-            const savedCurrency = currencies.find(c => c.code === userData.currency);
-            if (savedCurrency) {
-              setCurrency(savedCurrency);
+          logoutTimeout = setTimeout(() => {
+            if (!auth.currentUser) {
+              setCurrentUser(null);
+              router.push("/login");
+              setIsAuthInitialized(true);
+            }
+          }, 2000);
+          return;
+        }
+        
+        if (logoutTimeout) clearTimeout(logoutTimeout);
+
+        if (!currentUser || currentUser.uid !== user.uid) {
+          setCurrentUser(user);
+        }
+        
+        // 🚀 NEW: Extend session when Firebase reconnects
+        extendPOSSession();
+        
+        const ownerId = user.uid;
+
+        try {
+          const userDocRef = doc(db, "users", ownerId);
+          const userSnap = await getDoc(userDocRef);
+
+          if (userSnap.exists()) {
+            const userData = userSnap.data();
+            setOwnerName(userData.name || "Owner");
+            
+            if (userData.currency) {
+              const savedCurrency = currencies.find(c => c.code === userData.currency);
+              if (savedCurrency) {
+                setCurrency(savedCurrency);
+              }
             }
           }
-        }
 
-        const branchesRef = collection(db, "users", ownerId, "branches");
-        const branchesQuery = query(branchesRef, orderBy("branchNumber", "asc"));
+          const branchesRef = collection(db, "users", ownerId, "branches");
+          const branchesQuery = query(branchesRef, orderBy("branchNumber", "asc"));
 
-        const unsubscribeBranches = onSnapshot(branchesQuery, (snap) => {
-          const branchList: Branch[] = snap.docs.map((d) => {
-            const data = d.data();
-            return {
-              id: d.id,
-              shopName: data.shopName,
-              ownerId: data.ownerId,
-              isMain: data.isMain || false,
-              currency: data.currency || currency.code,
-              currencySymbol: data.currencySymbol || currency.symbol,
-            };
-          });
-        
-          setBranches(branchList);
+          const unsubscribeBranches = onSnapshot(branchesQuery, (snap) => {
+            const branchList: Branch[] = snap.docs.map((d) => {
+              const data = d.data();
+              return {
+                id: d.id,
+                shopName: data.shopName,
+                ownerId: data.ownerId,
+                isMain: data.isMain || false,
+                currency: data.currency || currency.code,
+                currencySymbol: data.currencySymbol || currency.symbol,
+              };
+            });
           
-          const timeoutId = setTimeout(() => {
-            localStorage.setItem("branches_cache", JSON.stringify(branchList));
-          }, 500);
+            setBranches(branchList);
+            
+            const timeoutId = setTimeout(() => {
+              localStorage.setItem("branches_cache", JSON.stringify(branchList));
+            }, 500);
+            
+            const storedBranch = localStorage.getItem("activeBranch");
           
-          const storedBranch = localStorage.getItem("activeBranch");
-        
-          if (storedBranch && !activeBranch) {
-            const parsed = JSON.parse(storedBranch);
-            const found = branchList.find((b) => b.id === parsed.id);
-            if (found) {
-              setActiveBranch(found);
+            if (storedBranch && !activeBranch) {
+              const parsed = JSON.parse(storedBranch);
+              const found = branchList.find((b) => b.id === parsed.id);
+              if (found) {
+                setActiveBranch(found);
+              } else if (branchList.length > 0 && !activeBranch) {
+                setActiveBranch(branchList[0]);
+              }
             } else if (branchList.length > 0 && !activeBranch) {
               setActiveBranch(branchList[0]);
             }
-          } else if (branchList.length > 0 && !activeBranch) {
-            setActiveBranch(branchList[0]);
-          }
-          
-          return () => clearTimeout(timeoutId);
-        }, (error) => {
-          if (DEBUG) console.error("Error loading branches:", error);
-        });
+            
+            return () => clearTimeout(timeoutId);
+          }, (error) => {
+            if (DEBUG) console.error("Error loading branches:", error);
+          });
 
-        unsubscribeRefs.current.push(unsubscribeBranches);
-        setIsAuthInitialized(true);
-      } catch (error) {
-        if (DEBUG) console.error("Error in auth setup:", error);
-        setIsAuthInitialized(true);
-      }
-    });
+          unsubscribeRefs.current.push(unsubscribeBranches);
+          setIsAuthInitialized(true);
+        } catch (error) {
+          if (DEBUG) console.error("Error in auth setup:", error);
+          setIsAuthInitialized(true);
+        }
+      });
+    };
+
+    checkAuth();
 
     return () => {
-      unsubscribeAuth();
+      if (logoutTimeout) clearTimeout(logoutTimeout);
+      if (unsubscribeAuth) unsubscribeAuth();
       unsubscribeRefs.current.forEach(unsubscribe => unsubscribe());
       unsubscribeRefs.current = [];
     };
-  }, [router, currency.code, currency.symbol]);
+  }, [router, currency.code, currency.symbol, activeBranch, setActiveBranch]);
 
   /* ---------------- UPDATE USER CURRENCY PREFERENCE ---------------- */
   const updateUserCurrency = useCallback(async (selectedCurrency: CurrencyOption) => {
@@ -729,7 +828,9 @@ export default function OwnerDashboard() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 text-gray-900">
-      {/* Header - NOT sticky */}
+      {/* Offline Banner */}
+      <OfflineBanner isOffline={isOffline} />
+
       <header className="bg-gradient-to-b from-gray-900 via-gray-900/95 to-gray-900/90 text-white shadow-2xl border-b border-white/10">
         <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
           {/* TOP BAR */}
@@ -1023,8 +1124,21 @@ export default function OwnerDashboard() {
             transform: translateY(0);
           }
         }
+        @keyframes slide-in-from-bottom-5 {
+          from {
+            opacity: 0;
+            transform: translateY(100%);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
         .animate-in.slide-in-from-top-2 {
           animation: slide-in-from-top 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .animate-in.slide-in-from-bottom-5 {
+          animation: slide-in-from-bottom-5 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         }
         .truncate {
           overflow: hidden;

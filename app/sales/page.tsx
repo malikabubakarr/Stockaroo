@@ -30,6 +30,7 @@ const DEBUG = false;
 interface Product {
   id: string;
   name: string;
+  category?: string;
   barcode?: string;
   qty: number;
   saleRate: number;
@@ -154,68 +155,6 @@ const highlightMatch = (text: string, search: string) => {
   );
 };
 
-// 🔥 CORE SCORING FUNCTION (Hybrid Fuzzy + Prefix Search)
-const calculateSearchScore = (
-  name: string, 
-  query: string, 
-  queryWords: string[], 
-  barcode: string
-): number => {
-  if (!query) return 0;
-  
-  const normalizedName = name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  const normalizedQuery = query.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  
-  let score = 0;
-  
-  // 1. BARCODE MATCH (95-100) - Instant priority
-  if (barcode && barcode.toLowerCase().includes(normalizedQuery)) {
-    score = 100;
-  }
-  
-  // 2. EXACT MATCH (95)
-  if (normalizedName === normalizedQuery) score = Math.max(score, 95);
-  
-  // 3. PREFIX MATCH (80-90) - "mil" → Milk
-  if (normalizedName.startsWith(normalizedQuery)) score = Math.max(score, 85);
-  
-  // 4. camelCase/TitleCase Prefix (75) - "iP" → iPhone
-  if (/[A-Z]/.test(name) && normalizedName.startsWith(normalizedQuery.replace(/[^a-z]/g, ''))) {
-    score = Math.max(score, 75);
-  }
-  
-  // 5. WHOLE WORD MATCH (70-80)
-  queryWords.forEach(word => {
-    if (normalizedName.includes(` ${word} `) || 
-        normalizedName.startsWith(`${word} `) || 
-        normalizedName.endsWith(` ${word}`)) {
-      score = Math.max(score, 80);
-    }
-  });
-  
-  // 6. CONTAINS MATCH (50-70)
-  if (normalizedName.includes(normalizedQuery)) {
-    score = Math.max(score, 60);
-  }
-  
-  // 7. MULTI-WORD FUZZY (30-55)
-  let wordMatches = 0;
-  queryWords.forEach(word => {
-    if (normalizedName.includes(word)) wordMatches++;
-  });
-  if (wordMatches > 0) {
-    score = Math.max(score, 30 + (wordMatches * 10));
-  }
-  
-  // 8. FIRST LETTERS MATCH (40) - "ab" → Apple Banana
-  if (queryWords.length > 1) {
-    const firstLetters = queryWords.map(w => w[0]).join('');
-    if (normalizedName.includes(firstLetters)) score = Math.max(score, 40);
-  }
-  
-  return Math.min(100, score);
-};
-
 // Offline Banner Component
 const OfflineBanner = ({ isOffline, isSlowConnection }: { isOffline: boolean; isSlowConnection: boolean }) => {
   if (!isOffline && !isSlowConnection) return null;
@@ -266,7 +205,6 @@ export default function Sales() {
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [showDecimalInput, setShowDecimalInput] = useState(false);
   
-  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState("");
   const [isScanningInProgress, setIsScanningInProgress] = useState(false);
@@ -502,12 +440,6 @@ export default function Sales() {
     setToast({ type, title, message });
   };
 
-  // Debounce search
-  useEffect(() => {
-    const timer = setTimeout(() => setDebouncedSearch(searchTerm), 300);
-    return () => clearTimeout(timer);
-  }, [searchTerm]);
-
   // Auto-sync offline sales when online
   useEffect(() => {
     const syncOfflineSales = async () => {
@@ -624,7 +556,7 @@ export default function Sales() {
     };
   }, []);
 
-  // Load products with cache and auto-detect units
+  // Load products with cache and auto-detect units - INCLUDING CATEGORY
   useEffect(() => {
     if (!activeBranch?.id || !ownerId || isLoading) return;
 
@@ -644,6 +576,7 @@ export default function Sales() {
         return {
           id: d.id,
           name: data.name,
+          category: data.category,
           barcode: data.barcode || '',
           qty: data.qty,
           saleRate: data.saleRate,
@@ -748,7 +681,6 @@ export default function Sales() {
         playBeep("success");
         setSelectedProduct(product);
         setSearchTerm(product.name);
-        setDebouncedSearch(product.name);
         
         const isDecimal = isDecimalUnit(product.unit || detectUnitFromName(product.name));
         const defaultQty = isDecimal ? 1.0 : 1;
@@ -852,36 +784,128 @@ export default function Sales() {
     setCameraError("");
   };
 
-  // 🔥 HYBRID FUZZY + PREFIX SEARCH RESULTS
+  // 🚀 SUPERCHARGED POS SEARCH - Exact match first, then fuzzy, then partial
   const searchResults = useMemo(() => {
-    if (!debouncedSearch?.trim()) return [];
+    if (!searchTerm.trim()) return [];
 
-    const query = debouncedSearch.trim().toLowerCase();
-    const queryWords = query.split(/\s+/).filter(Boolean);
+    const searchLower = searchTerm.trim().toLowerCase();
+    const searchLength = searchTerm.length;
     
-    return products
-      .filter(p => p.allowSale && p.qty > 0)
-      .map(product => {
-        const score = calculateSearchScore(product.name, query, queryWords, product.barcode || '');
-        return { product, score };
-      })
-      .filter(({ score }) => score >= 25) // Minimum relevance threshold
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 12)
-      .map(({ product }) => product);
-  }, [products, debouncedSearch]);
+    // Clone products to avoid mutating
+    const allProducts = [...products];
+    
+    // 🔥 PRIORITY 1: EXACT MATCHES (case-insensitive) - Show FIRST
+    const exactMatches = allProducts.filter(p => 
+      p.name.toLowerCase() === searchLower ||
+      (p.barcode && String(p.barcode).toLowerCase() === searchLower)
+    );
+    
+    // 🔥 PRIORITY 2: STARTS WITH MATCHES (name or barcode) - Super fast typing
+    const startsWithMatches = allProducts.filter(p => {
+      if (p.name.toLowerCase().startsWith(searchLower)) return true;
+      if (p.barcode && String(p.barcode).toLowerCase().startsWith(searchLower)) return true;
+      return false;
+    }).filter(p => 
+      !exactMatches.some(em => em.id === p.id)
+    );
+    
+    // 🔥 PRIORITY 3: FUZZY MATCHES (contains anywhere in name/barcode/category)
+    const fuzzyMatches = allProducts.filter(p => {
+      const nameMatch = p.name.toLowerCase().includes(searchLower);
+      const barcodeMatch = p.barcode && String(p.barcode).toLowerCase().includes(searchLower);
+      const categoryMatch = p.category && p.category.toLowerCase().includes(searchLower);
+      return (nameMatch || barcodeMatch || categoryMatch) &&
+             !exactMatches.some(em => em.id === p.id) &&
+             !startsWithMatches.some(sw => sw.id === p.id);
+    });
+    
+    // 🔥 PRIORITY 4: Very short searches (1-2 chars) - Show popular/recent first
+    const shortSearchMatches = searchLength <= 2 
+      ? allProducts.filter(p => 
+          p.name.toLowerCase().includes(searchLower) ||
+          (p.barcode && String(p.barcode).toLowerCase().includes(searchLower))
+        ).filter(p => 
+          !exactMatches.some(em => em.id === p.id) &&
+          !startsWithMatches.some(sw => sw.id === p.id) &&
+          !fuzzyMatches.some(fm => fm.id === p.id)
+        )
+      : [];
+    
+    // Combine with PERFECT priority order
+    const combined = [
+      ...exactMatches,
+      ...startsWithMatches,
+      ...fuzzyMatches,
+      ...shortSearchMatches
+    ];
+    
+    // 🔥 FINAL SORT: Available first, then by relevance score
+    return combined.sort((a, b) => {
+      // Available products ALWAYS first
+      const aAvailable = (a.allowSale && a.qty > 0) ? 1 : 0;
+      const bAvailable = (b.allowSale && b.qty > 0) ? 1 : 0;
+      
+      if (aAvailable !== bAvailable) {
+        return bAvailable - aAvailable;
+      }
+      
+      // Relevance scoring
+      const getRelevanceScore = (product: Product) => {
+        const name = product.name.toLowerCase();
+        let score = 0;
+        
+        // Exact match bonus
+        if (name === searchLower || (product.barcode && String(product.barcode).toLowerCase() === searchLower)) {
+          score += 1000;
+        }
+        
+        // Starts with bonus
+        if (name.startsWith(searchLower) || (product.barcode && String(product.barcode).toLowerCase().startsWith(searchLower))) {
+          score += 500;
+        }
+        
+        // Contains match
+        if (name.includes(searchLower) || (product.barcode && String(product.barcode).toLowerCase().includes(searchLower))) {
+          score += 100;
+        }
+        
+        // Category match bonus
+        if (product.category && product.category.toLowerCase().includes(searchLower)) {
+          score += 50;
+        }
+        
+        // Stock priority (more stock = higher priority)
+        score += Math.min(product.qty, 100);
+        
+        return score;
+      };
+      
+      const aScore = getRelevanceScore(a);
+      const bScore = getRelevanceScore(b);
+      
+      return bScore - aScore;
+    }).slice(0, 15);
+  }, [products, searchTerm]);
+
+  // Get exact matches count for display
+  const exactMatchesCount = useMemo(() => {
+    if (!searchTerm.trim()) return 0;
+    const searchLower = searchTerm.trim().toLowerCase();
+    return products.filter(p => 
+      p.name.toLowerCase() === searchLower ||
+      (p.barcode && String(p.barcode).toLowerCase() === searchLower)
+    ).length;
+  }, [products, searchTerm]);
 
   // Handle product select
   const handleProductSelect = useCallback((product: Product) => {
     setSelectedProduct(product);
     setSearchTerm(product.name);
-    setDebouncedSearch(product.name);
   }, []);
 
   // Clear search
   const clearSearch = useCallback(() => {
     setSearchTerm("");
-    setDebouncedSearch("");
     setSelectedProduct(null);
   }, []);
 
@@ -956,14 +980,10 @@ export default function Sales() {
 
   // Add to cart
   const addToCart = useCallback(() => {
-    const product = selectedProduct || products.find((p) => 
-      p.name.toLowerCase() === searchTerm.toLowerCase() ||
-      p.barcode === searchTerm ||
-      p.id === searchTerm
-    );
+    const product = selectedProduct;
     
     if (!product) {
-      showToast('error', 'Product Not Found', `No product: "${searchTerm}"`);
+      showToast('error', 'Product Not Found', `Please select a product from search results`);
       return;
     }
 
@@ -973,7 +993,7 @@ export default function Sales() {
       return;
     }
     addToCartWithQuantity(product, quantity);
-  }, [products, searchTerm, qty, selectedProduct, addToCartWithQuantity, showToast]);
+  }, [selectedProduct, qty, addToCartWithQuantity, showToast]);
 
   const removeFromCart = useCallback((id: string) => {
     const item = cart.find(c => c.id === id);
@@ -1400,7 +1420,7 @@ export default function Sales() {
               <div className="space-y-4">
                 <div className="relative">
                   <label className="block text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
-                    <span>🔍 Search Product by Name or Barcode</span>
+                    <span>🔍 Search Product by Name, Category, or Barcode</span>
                     {selectedProduct && <span className="px-2 py-1 bg-green-100 text-green-800 rounded-full text-xs font-semibold">Selected: {selectedProduct.name}</span>}
                   </label>
                   
@@ -1408,20 +1428,37 @@ export default function Sales() {
                     <input 
                       type="text" 
                       placeholder="Type product name or scan barcode..." 
-                      className={`w-full px-5 py-4 rounded-2xl border-2 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/20 outline-none transition-all duration-300 text-lg font-semibold text-gray-900 placeholder-gray-400 ${isScanningInProgress ? 'border-green-400 bg-green-50 ring-2 ring-green-200/50' : 'border-gray-300 hover:border-gray-400'}`} 
+                      className={`w-full px-5 py-4 rounded-2xl border-2 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/20 outline-none transition-all duration-200 text-lg font-semibold text-gray-900 placeholder-gray-400 ${isScanningInProgress ? 'border-green-400 bg-green-50 ring-2 ring-green-200/50' : 'border-gray-300 hover:border-gray-400'}`} 
                       value={searchTerm} 
                       onChange={(e) => { 
                         const value = e.target.value;
                         setSearchTerm(value);
                         setSelectedProduct(null);
-                        setDebouncedSearch(value);
                       }} 
                       onKeyDown={(e) => { 
-                        if (e.key === 'Enter' && selectedProduct) {
-                          addToCart();
-                        } else if (e.key === 'Enter' && searchResults.length > 0) {
+                        // 🚀 ENTER = Add FIRST RESULT INSTANTLY (POS style)
+                        if (e.key === 'Enter') {
+                          if (selectedProduct) {
+                            addToCart();
+                          } else if (searchResults.length > 0) {
+                            // Auto-select and add FIRST result (most relevant)
+                            handleProductSelect(searchResults[0]);
+                            setTimeout(() => addToCart(), 50);
+                          }
+                          return;
+                        }
+                        
+                        // 🚀 ARROW KEYS for navigation
+                        if (e.key === 'ArrowDown' && searchResults.length > 0) {
+                          e.preventDefault();
                           handleProductSelect(searchResults[0]);
-                          setTimeout(() => addToCart(), 100);
+                          return;
+                        }
+                        
+                        // 🚀 ESC to clear
+                        if (e.key === 'Escape') {
+                          clearSearch();
+                          e.currentTarget.blur();
                         }
                       }} 
                       autoFocus 
@@ -1436,47 +1473,144 @@ export default function Sales() {
                     )}
                   </div>
                   
-                  {debouncedSearch && searchResults.length > 0 && !selectedProduct && (
-                    <div className="absolute z-50 w-full mt-2 bg-white rounded-xl shadow-2xl border border-gray-200 max-h-80 overflow-y-auto">
-                      {searchResults.map(p => (
-                        <div
-                          key={p.id}
-                          className="p-4 hover:bg-gray-50 cursor-pointer border-b border-gray-100 last:border-0 transition-all duration-200"
-                          onClick={() => handleProductSelect(p)}
-                        >
-                          <div className="flex justify-between items-start">
-                            <div className="flex-1">
-                              <div className="font-bold text-gray-900 text-lg">
-                                {highlightMatch(p.name, debouncedSearch)}
+                  {/* Enhanced Search Results Display with priority badges */}
+                  {searchTerm && searchResults.length > 0 && !selectedProduct && (
+                    <div className="absolute z-50 w-full mt-2 bg-white/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-gray-200/50 max-h-96 overflow-y-auto">
+                      <div className="px-4 py-2 border-b border-gray-100 bg-gradient-to-r from-blue-50 to-indigo-50 sticky top-0">
+                        <span className="text-xs font-semibold text-gray-700">
+                          🏆 Top {searchResults.length} matches
+                          {exactMatchesCount > 0 && (
+                            <span className="ml-2 bg-green-100 text-green-800 px-1.5 py-0.5 rounded text-xs font-bold">
+                              {exactMatchesCount} exact
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                      
+                      {searchResults.map((p, index) => {
+                        const isAvailable = p.allowSale && p.qty > 0;
+                        const isExactMatch = p.name.toLowerCase() === searchTerm.toLowerCase() || 
+                                            (p.barcode && String(p.barcode).toLowerCase() === searchTerm.toLowerCase());
+                        const isStartsWith = p.name.toLowerCase().startsWith(searchTerm.toLowerCase()) ||
+                                            (p.barcode && String(p.barcode).toLowerCase().startsWith(searchTerm.toLowerCase()));
+                        
+                        return (
+                          <div
+                            key={p.id}
+                            className={`p-4 border-b border-gray-50 last:border-b-0 hover:bg-blue-50/50 cursor-pointer transition-all duration-150 group relative ${
+                              index === 0 ? 'bg-blue-50 border-l-4 border-blue-500' : ''
+                            }`}
+                            onClick={() => {
+                              if (isAvailable) {
+                                handleProductSelect(p);
+                                if (isExactMatch) {
+                                  setTimeout(() => addToCart(), 50);
+                                }
+                              } else {
+                                if (p.qty <= 0) {
+                                  showToast('error', 'Out of Stock', `${p.name} is out of stock`);
+                                } else if (!p.allowSale) {
+                                  showToast('error', 'Not for Sale', `${p.name} cannot be sold`);
+                                }
+                              }
+                            }}
+                          >
+                            {/* Priority Badge */}
+                            {isExactMatch && (
+                              <div className="absolute -top-2 -right-2 bg-green-500 text-white text-xs px-2 py-1 rounded-full shadow-lg animate-pulse">
+                                🎯 EXACT
                               </div>
-                              <div className="text-sm text-gray-500 mt-1 flex flex-wrap gap-2">
-                                {p.barcode && <span className="bg-gray-100 px-2 py-0.5 rounded">📦 {p.barcode}</span>}
-                                <span>📊 Stock: {p.qty} {p.unit || 'pcs'}</span>
-                                <span>💰 {currency.symbol}{p.saleRate.toLocaleString()}</span>
-                                <span className={p.profit >= 0 ? 'text-green-600' : 'text-red-600'}>
-                                  Profit: {currency.symbol}{p.profit.toLocaleString()}
-                                </span>
+                            )}
+                            
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-1 flex-wrap">
+                                  <div className={`text-xs font-bold px-2 py-1 rounded-full ${
+                                    isExactMatch ? 'bg-green-100 text-green-800' :
+                                    isStartsWith ? 'bg-blue-100 text-blue-800' :
+                                    'bg-indigo-100 text-indigo-800'
+                                  }`}>
+                                    {isExactMatch ? 'EXACT' : isStartsWith ? 'STARTS' : 'MATCH'}
+                                  </div>
+                                  {!isAvailable && (
+                                    <span className="text-xs px-2 py-1 bg-red-100 text-red-700 rounded-full font-bold">
+                                      {p.qty <= 0 ? 'STOCK OUT' : 'NO SALE'}
+                                    </span>
+                                  )}
+                                </div>
+                                
+                                <div className="font-bold text-lg text-gray-900 leading-tight mb-1 group-hover:text-blue-900">
+                                  {highlightMatch(p.name, searchTerm)}
+                                </div>
+                                
+                                <div className="flex flex-wrap gap-2 text-sm text-gray-600 mb-2">
+                                  {p.category && (
+                                    <span className="bg-purple-100 text-purple-800 px-2 py-1 rounded-full text-xs">
+                                      📂 {p.category}
+                                    </span>
+                                  )}
+                                  {p.barcode && (
+                                    <span className="bg-gray-100 text-gray-800 px-2 py-1 rounded-full text-xs truncate max-w-24">
+                                      📦 {p.barcode}
+                                    </span>
+                                  )}
+                                  <span className="bg-emerald-100 text-emerald-800 px-2 py-1 rounded-full text-xs">
+                                    📊 {p.qty} {p.unit || 'pcs'}
+                                  </span>
+                                </div>
+                              </div>
+                              
+                              <div className="text-right shrink-0 ml-2">
+                                <div className="text-2xl font-bold text-gray-900 mb-1">
+                                  {currency.symbol}{p.saleRate.toLocaleString()}
+                                </div>
+                                <div className={`text-sm font-bold ${
+                                  p.profit >= 0 ? 'text-green-600' : 'text-red-600'
+                                }`}>
+                                  +{currency.symbol}{p.profit.toLocaleString()}
+                                </div>
                               </div>
                             </div>
+                            
+                            {/* Add Button - Always visible */}
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                handleProductSelect(p);
-                                setTimeout(() => addToCart(), 100);
+                                if (isAvailable) {
+                                  handleProductSelect(p);
+                                  setTimeout(() => addToCart(), 50);
+                                } else {
+                                  showToast(
+                                    p.qty <= 0 ? 'error' : 'warning', 
+                                    p.qty <= 0 ? 'Out of Stock' : 'Not for Sale', 
+                                    `${p.name} cannot be added`
+                                  );
+                                }
                               }}
-                              className="ml-3 px-4 py-2 bg-gradient-to-r from-emerald-500 to-emerald-600 text-white text-sm font-bold rounded-lg hover:shadow-lg transition-all"
+                              disabled={!isAvailable}
+                              className={`mt-3 w-full py-2 px-4 rounded-xl font-bold text-sm transition-all duration-200 flex items-center justify-center gap-2 ${
+                                isAvailable
+                                  ? 'bg-gradient-to-r from-emerald-500 to-emerald-600 text-white hover:shadow-xl hover:scale-[1.02] hover:from-emerald-600 hover:to-emerald-700'
+                                  : 'bg-gray-200 text-gray-500 cursor-not-allowed'
+                              }`}
                             >
-                              Add
+                              {isAvailable ? (
+                                <>
+                                  ➕ <span>Add {p.unit === 'pcs' ? 'Item' : 'Qty'}</span>
+                                </>
+                              ) : (
+                                p.qty <= 0 ? 'Out of Stock' : 'Not for Sale'
+                              )}
                             </button>
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                   
-                  {debouncedSearch && searchResults.length === 0 && !selectedProduct && (
+                  {searchTerm && searchResults.length === 0 && !selectedProduct && (
                     <div className="absolute z-50 w-full mt-2 bg-white rounded-xl shadow-2xl border border-gray-200 p-4 text-center text-gray-500">
-                      No products found matching "{debouncedSearch}"
+                      No products found matching &quot;{searchTerm}&quot;
                     </div>
                   )}
                 </div>

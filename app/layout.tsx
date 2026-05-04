@@ -1,6 +1,9 @@
 import "./globals.css";
 import { BranchProvider } from "@/context/BranchContext";
 import PWAInstallPrompt from "@/components/PWAInstallPrompt";
+import SessionManager from "@/components/SessionManager";
+// 🚀 NEW: Global session keeper
+import { extendPOSSession } from "@/lib/auth";
 
 export const metadata = {
   title: "Stockaroo",
@@ -12,7 +15,7 @@ export const metadata = {
   },
   appleWebApp: {
     capable: true,
-    statusBarStyle: "default", // ✅ better for light mode
+    statusBarStyle: "default",
     title: "Stockaroo",
   },
 };
@@ -21,8 +24,17 @@ export const viewport = {
   width: "device-width",
   initialScale: 1,
   maximumScale: 1,
-  themeColor: "#ffffff", // ✅ force light theme
+  themeColor: "#ffffff",
 };
+
+// 🚀 NEW: Keep 12hr session alive globally
+if (typeof window !== "undefined") {
+  // Extend session every 30min
+  setInterval(extendPOSSession, 30 * 60 * 1000);
+  
+  // Extend on any page load
+  extendPOSSession();
+}
 
 export default function RootLayout({
   children,
@@ -32,7 +44,7 @@ export default function RootLayout({
   return (
     <html lang="en" className="light">
       <head>
-        {/* ✅ FORCE LIGHT MODE */}
+        {/* FORCE LIGHT MODE */}
         <meta name="color-scheme" content="light" />
         <meta name="theme-color" content="#ffffff" />
 
@@ -49,15 +61,16 @@ export default function RootLayout({
 
         {/* Windows */}
         <meta name="msapplication-TileColor" content="#ffffff" />
-        <meta name="msapplication-TileImage" content="/icons/icon-192x192.png" />
+        <meta name="msapplication-TileColor" content="/icons/icon-192x192.png" />
 
         {/* Favicon */}
         <link rel="icon" href="/icons/icon-192x192.png" />
       </head>
 
-      {/* ✅ FORCE LIGHT UI */}
+      {/* FORCE LIGHT UI */}
       <body className="bg-white text-gray-900">
         <BranchProvider>
+          <SessionManager />
           {children}
         </BranchProvider>
 

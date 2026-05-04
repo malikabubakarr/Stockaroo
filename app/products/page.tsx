@@ -22,8 +22,7 @@ import {
   DocumentData,
   QueryConstraint,
   setDoc,
-  enableNetwork,
-  disableNetwork,
+  onSnapshot,
 } from "firebase/firestore";
 import { onAuthStateChanged } from "firebase/auth";
 import * as XLSX from "xlsx";
@@ -106,6 +105,9 @@ interface AppState {
   branches: Branch[];
   selectedBranchId: string | null;
   isInitialLoad: boolean;
+  importProgress: number;
+  importStatus: string;
+  totalProductCount: number;
 }
 
 type AppAction =
@@ -124,7 +126,10 @@ type AppAction =
   | { type: 'SET_OWNER_NAME'; payload: string }
   | { type: 'SET_BRANCHES'; payload: Branch[] }
   | { type: 'SET_SELECTED_BRANCH'; payload: string | null }
-  | { type: 'SET_INITIAL_LOAD'; payload: boolean };
+  | { type: 'SET_INITIAL_LOAD'; payload: boolean }
+  | { type: 'SET_IMPORT_PROGRESS'; payload: number }
+  | { type: 'SET_IMPORT_STATUS'; payload: string }
+  | { type: 'SET_TOTAL_PRODUCT_COUNT'; payload: number };
 
 const appReducer = (state: AppState, action: AppAction): AppState => {
   switch (action.type) {
@@ -169,9 +174,15 @@ const appReducer = (state: AppState, action: AppAction): AppState => {
     case 'SET_BRANCHES':
       return { ...state, branches: action.payload };
     case 'SET_SELECTED_BRANCH':
-      return { ...state, selectedBranchId: action.payload, products: [], lastDoc: null, hasMore: true };
+      return { ...state, selectedBranchId: action.payload, products: [], lastDoc: null, hasMore: true, totalProductCount: 0 };
     case 'SET_INITIAL_LOAD':
       return { ...state, isInitialLoad: action.payload };
+    case 'SET_IMPORT_PROGRESS':
+      return { ...state, importProgress: action.payload };
+    case 'SET_IMPORT_STATUS':
+      return { ...state, importStatus: action.payload };
+    case 'SET_TOTAL_PRODUCT_COUNT':
+      return { ...state, totalProductCount: action.payload };
     default:
       return state;
   }
@@ -196,7 +207,7 @@ function useDebounce<T extends (...args: any[]) => any>(func: T, wait: number): 
 }
 
 const PAGE_SIZE = 50;
-const BATCH_SIZE = 400;
+const BATCH_SIZE = 50;
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
 
 export default function Products() {
@@ -231,6 +242,9 @@ export default function Products() {
     branches: [],
     selectedBranchId: null,
     isInitialLoad: true,
+    importProgress: 0,
+    importStatus: "",
+    totalProductCount: 0,
   });
 
   const [authUser, setAuthUser] = useState<any>(null);
@@ -272,7 +286,6 @@ export default function Products() {
       const cached = localStorage.getItem(cacheKey);
       if (cached) {
         const { products, timestamp } = JSON.parse(cached);
-        // Check if cache is less than 1 hour old
         if (Date.now() - timestamp < 60 * 60 * 1000) {
           dispatch({ type: 'SET_PRODUCTS', payload: products });
           console.log("📦 Loaded cached products for offline mode");
@@ -323,7 +336,24 @@ export default function Products() {
     dispatch({ type: 'SET_SEARCH_TERM', payload: value });
   }, 300);
 
-  // Enhanced offline detection with slow connection handling
+  // Real-time total product count
+  useEffect(() => {
+    if (!state.selectedBranchId || !authUser) return;
+
+    const productsRef = getUserProductsRef(authUser.uid);
+    const q = query(productsRef, where("branchId", "==", state.selectedBranchId));
+    
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      dispatch({ type: 'SET_TOTAL_PRODUCT_COUNT', payload: snapshot.size });
+      console.log("📊 Real-time total products:", snapshot.size);
+    }, (error) => {
+      console.error("Error counting products:", error);
+    });
+
+    return () => unsubscribe();
+  }, [state.selectedBranchId, authUser, getUserProductsRef]);
+
+  // Enhanced offline detection
   useEffect(() => {
     let connectionMonitor: NodeJS.Timeout;
     
@@ -334,7 +364,6 @@ export default function Products() {
         return;
       }
       
-      // Test connection quality
       try {
         const startTime = Date.now();
         await fetch('/api/ping', { method: 'HEAD', cache: 'no-store', signal: AbortSignal.timeout(5000) });
@@ -349,7 +378,6 @@ export default function Products() {
 
     const handleOnline = () => {
       checkConnection();
-      // Try to refresh data when coming back online
       if (state.selectedBranchId && authUser) {
         setTimeout(() => loadProducts(true), 500);
       }
@@ -426,7 +454,7 @@ export default function Products() {
   }, [authUser]);
 
   // ============================================
-  // LOAD PRODUCTS - WITH OFFLINE SUPPORT
+  // LOAD PRODUCTS - WITH PAGINATION
   // ============================================
   const loadProducts = useCallback(async (reset: boolean = true) => {
     if (isLoadingProductsRef.current) {
@@ -441,18 +469,6 @@ export default function Products() {
       console.log("❌ Cannot load: missing branch or user");
       isLoadingProductsRef.current = false;
       return;
-    }
-    
-    // Try to load from cache first if offline or slow
-    if (!isOnline && reset && !initialLoadDoneRef.current) {
-      const hasCache = loadCachedProducts(state.selectedBranchId);
-      if (hasCache) {
-        dispatch({ type: 'SET_INITIAL_LOAD', payload: false });
-        dispatch({ type: 'SET_LOADING', payload: false });
-        isLoadingProductsRef.current = false;
-        initialLoadDoneRef.current = true;
-        return;
-      }
     }
     
     if (reset) {
@@ -510,13 +526,15 @@ export default function Products() {
         dispatch({ type: 'SET_PRODUCTS', payload: updatedProducts });
       }
       
-      // Cache products for offline use
       if (reset) {
         cacheProducts(updatedProducts, state.selectedBranchId);
       }
       
-      dispatch({ type: 'SET_LAST_DOC', payload: snap.docs[snap.docs.length - 1] || null });
-      dispatch({ type: 'SET_HAS_MORE', payload: snap.docs.length === PAGE_SIZE });
+      const lastDocSnap = snap.docs[snap.docs.length - 1] || null;
+      const hasMore = snap.docs.length === PAGE_SIZE;
+      
+      dispatch({ type: 'SET_LAST_DOC', payload: lastDocSnap });
+      dispatch({ type: 'SET_HAS_MORE', payload: hasMore });
       dispatch({ type: 'SET_INITIAL_LOAD', payload: false });
       initialLoadDoneRef.current = true;
       
@@ -528,7 +546,6 @@ export default function Products() {
       
       console.error("❌ Load products error:", error);
       
-      // If offline and we have cached data, use it
       if (!isOnline) {
         const hasCache = loadCachedProducts(state.selectedBranchId);
         if (hasCache) {
@@ -589,50 +606,9 @@ export default function Products() {
     };
   }, [state.hasMore, state.loadingMore, state.loading, loadProducts]);
 
-  // Create product with unique barcode
-  const createProductWithUniqueBarcode = useCallback(async (productData: any) => {
-    const user = authUser;
-    if (!user || !state.selectedBranchId) throw new Error("Missing user or branch");
-
-    const barcodeValue = productData.barcode;
-    if (!barcodeValue) {
-      const productsRef = getUserProductsRef(user.uid);
-      return await addDoc(productsRef, productData);
-    }
-
-    const cleanBar = cleanBarcode(barcodeValue);
-    if (!cleanBar) {
-      const productsRef = getUserProductsRef(user.uid);
-      return await addDoc(productsRef, productData);
-    }
-
-    let productId = "";
-    
-    await runTransaction(db, async (tx) => {
-      const barcodeRef = getUserBarcodeDoc(user.uid, cleanBar);
-      const barcodeSnap = await tx.get(barcodeRef);
-
-      if (barcodeSnap.exists()) {
-        throw new Error(`Barcode ${cleanBar} already exists`);
-      }
-
-      const productsRef = getUserProductsRef(user.uid);
-      const productRef = doc(productsRef);
-      productId = productRef.id;
-      
-      tx.set(productRef, { ...productData, barcode: cleanBar, id: productId });
-      tx.set(barcodeRef, { 
-        productId, 
-        branchId: state.selectedBranchId,
-        ownerId: user.uid,
-        createdAt: serverTimestamp()
-      });
-    });
-    
-    return { id: productId };
-  }, [authUser, state.selectedBranchId, cleanBarcode, getUserProductsRef, getUserBarcodeDoc]);
-
-  // Import products from Excel
+  // ============================================
+  // OPTIMIZED IMPORT FUNCTION
+  // ============================================
   const handleImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -643,6 +619,8 @@ export default function Products() {
     }
 
     dispatch({ type: 'SET_LOADING', payload: true });
+    dispatch({ type: 'SET_IMPORT_PROGRESS', payload: 0 });
+    dispatch({ type: 'SET_IMPORT_STATUS', payload: "Reading file..." });
     
     try {
       const data = await file.arrayBuffer();
@@ -652,72 +630,141 @@ export default function Products() {
 
       if (!json.length) {
         showToast("Excel file is empty", "error");
+        dispatch({ type: 'SET_LOADING', payload: false });
         return;
       }
 
       const user = authUser;
       if (!user || !state.selectedBranchId) {
         showToast("Please select a branch first", "error");
+        dispatch({ type: 'SET_LOADING', payload: false });
         return;
       }
 
       let successCount = 0;
       let errorCount = 0;
+      let duplicateBarcodeCount = 0;
+      let invalidPriceCount = 0;
+      
       const productsRef = getUserProductsRef(user.uid);
-      const maxRows = Math.min(json.length, 1000);
-
-      for (let i = 0; i < maxRows; i += BATCH_SIZE) {
-        const batch = writeBatch(db);
-        const chunk = json.slice(i, Math.min(i + BATCH_SIZE, maxRows));
+      const maxRows = Math.min(json.length, 2000);
+      
+      dispatch({ type: 'SET_IMPORT_STATUS', payload: `Validating ${maxRows} products...` });
+      
+      // First pass: validate and prepare products
+      const validProducts: any[] = [];
+      const barcodesToCheck: string[] = [];
+      
+      for (let i = 0; i < maxRows; i++) {
+        const row = json[i];
+        const purchaseRate = Number(row.purchaseRate) || Number(row.purchase) || 0;
+        const saleRate = Number(row.saleRate) || Number(row.sale) || 0;
         
-        for (const row of chunk) {
-          const purchaseRate = Number(row.purchaseRate) || 0;
-          const saleRate = Number(row.saleRate) || 0;
-          
-          if (!row.name || row.name.trim() === "") {
-            errorCount++;
-            continue;
-          }
-          
-          if (saleRate < purchaseRate) {
-            errorCount++;
-            continue;
-          }
+        if (!row.name || row.name.trim() === "") {
+          errorCount++;
+          continue;
+        }
+        
+        if (saleRate < purchaseRate) {
+          invalidPriceCount++;
+          errorCount++;
+          continue;
+        }
 
-          const cleanBar = row.barcode ? cleanBarcode(String(row.barcode)) : "";
-          
-          if (cleanBar) {
-            const barcodeRef = getUserBarcodeDoc(user.uid, cleanBar);
-            const barcodeSnap = await getDoc(barcodeRef);
-            if (barcodeSnap.exists()) {
-              errorCount++;
-              continue;
+        const cleanBar = row.barcode ? cleanBarcode(String(row.barcode)) : "";
+        if (cleanBar) {
+          barcodesToCheck.push(cleanBar);
+        }
+        
+        validProducts.push({
+          name: row.name.trim(),
+          category: row.category || "",
+          unit: row.unit || "pcs",
+          qty: Number(row.qty) || 0,
+          minStock: Number(row.minStock) || 0,
+          purchaseRate,
+          originalPurchaseRate: purchaseRate,
+          saleRate,
+          originalSaleRate: saleRate,
+          profit: saleRate - purchaseRate,
+          allowSale: true,
+          branchId: state.selectedBranchId,
+          ownerId: user.uid,
+          barcode: cleanBar,
+        });
+      }
+      
+      if (validProducts.length === 0) {
+        showToast(`No valid products found. ${errorCount} errors.`, "error");
+        dispatch({ type: 'SET_LOADING', payload: false });
+        return;
+      }
+      
+      dispatch({ type: 'SET_IMPORT_STATUS', payload: `Checking ${barcodesToCheck.length} barcodes...` });
+      
+      // Batch check existing barcodes
+      const existingBarcodes = new Set<string>();
+      const barcodeBatchSize = 20;
+      
+      for (let i = 0; i < barcodesToCheck.length; i += barcodeBatchSize) {
+        const batchBarcodes = barcodesToCheck.slice(i, i + barcodeBatchSize);
+        const barcodeQueries = batchBarcodes.map(async (bar) => {
+          try {
+            const barcodeRef = getUserBarcodeDoc(user.uid, bar);
+            const snap = await getDoc(barcodeRef);
+            if (snap.exists()) {
+              existingBarcodes.add(bar);
             }
+          } catch (err) {
+            console.error("Barcode check error:", err);
           }
-
-          const ref = doc(productsRef);
-          batch.set(ref, {
-            name: row.name.trim(),
-            category: row.category || "",
-            unit: row.unit || "pcs",
-            qty: Number(row.qty) || 0,
-            minStock: Number(row.minStock) || 0,
-            purchaseRate,
-            originalPurchaseRate: purchaseRate,
-            saleRate,
-            originalSaleRate: saleRate,
-            profit: saleRate - purchaseRate,
-            allowSale: true,
-            branchId: state.selectedBranchId,
-            ownerId: user.uid,
+        });
+        await Promise.all(barcodeQueries);
+        
+        const progress = Math.floor((i / barcodesToCheck.length) * 30) + 10;
+        dispatch({ type: 'SET_IMPORT_PROGRESS', payload: progress });
+      }
+      
+      // Filter out products with duplicate barcodes
+      const finalProducts = validProducts.filter(product => {
+        if (product.barcode && existingBarcodes.has(product.barcode)) {
+          duplicateBarcodeCount++;
+          errorCount++;
+          return false;
+        }
+        return true;
+      });
+      
+      if (finalProducts.length === 0) {
+        showToast(`No new products to import. ${duplicateBarcodeCount} duplicate barcodes.`, "warning");
+        dispatch({ type: 'SET_LOADING', payload: false });
+        return;
+      }
+      
+      dispatch({ type: 'SET_IMPORT_STATUS', payload: `Importing ${finalProducts.length} products...` });
+      
+      // Import in smaller batches for better performance
+      const IMPORT_BATCH_SIZE = 30;
+      let importedCount = 0;
+      
+      for (let i = 0; i < finalProducts.length; i += IMPORT_BATCH_SIZE) {
+        const batch = writeBatch(db);
+        const chunk = finalProducts.slice(i, Math.min(i + IMPORT_BATCH_SIZE, finalProducts.length));
+        
+        for (const product of chunk) {
+          const productRef = doc(productsRef);
+          const productData = {
+            ...product,
             createdAt: serverTimestamp(),
-            barcode: cleanBar,
-          });
+            updatedAt: serverTimestamp(),
+          };
           
-          if (cleanBar) {
-            const barcodeMappingRef = getUserBarcodeDoc(user.uid, cleanBar);
+          batch.set(productRef, productData);
+          
+          if (product.barcode) {
+            const barcodeMappingRef = getUserBarcodeDoc(user.uid, product.barcode);
             batch.set(barcodeMappingRef, {
-              productId: ref.id,
+              productId: productRef.id,
               branchId: state.selectedBranchId,
               ownerId: user.uid,
               createdAt: serverTimestamp()
@@ -728,13 +775,34 @@ export default function Products() {
         }
         
         await batch.commit();
+        importedCount += chunk.length;
+        
+        const progress = 40 + Math.floor((importedCount / finalProducts.length) * 55);
+        dispatch({ type: 'SET_IMPORT_PROGRESS', payload: progress });
+        dispatch({ type: 'SET_IMPORT_STATUS', payload: `Imported ${importedCount}/${finalProducts.length} products...` });
       }
-
-      showToast(`Imported ${successCount} products (${errorCount} skipped)`, "success");
-      loadProducts(true);
+      
+      // Clear cache to force refresh
+      localStorage.removeItem(`products_cache_${user.uid}_${state.selectedBranchId}`);
+      
+      // Reload products
+      dispatch({ type: 'SET_IMPORT_STATUS', payload: "Reloading products..." });
+      await loadProducts(true);
+      
+      const summary = `✅ Imported: ${successCount} | ⚠️ Skipped: ${errorCount} (${duplicateBarcodeCount} duplicate barcodes, ${invalidPriceCount} invalid prices)`;
+      showToast(summary, successCount > 0 ? "success" : "error");
+      
+      dispatch({ type: 'SET_IMPORT_PROGRESS', payload: 100 });
+      setTimeout(() => {
+        dispatch({ type: 'SET_IMPORT_PROGRESS', payload: 0 });
+        dispatch({ type: 'SET_IMPORT_STATUS', payload: "" });
+      }, 3000);
+      
     } catch (error) {
       console.error("Import error:", error);
-      showToast("Error importing products", "error");
+      showToast("Error importing products: " + (error instanceof Error ? error.message : "Unknown error"), "error");
+      dispatch({ type: 'SET_IMPORT_PROGRESS', payload: 0 });
+      dispatch({ type: 'SET_IMPORT_STATUS', payload: "" });
     } finally {
       dispatch({ type: 'SET_LOADING', payload: false });
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -749,7 +817,7 @@ export default function Products() {
       return;
     }
 
-    if (!confirm("⚠️ WARNING: Delete ALL products in this branch?")) return;
+    if (!confirm("⚠️ WARNING: Delete ALL products in this branch? This action cannot be undone!")) return;
 
     dispatch({ type: 'SET_LOADING', payload: true });
     try {
@@ -790,7 +858,6 @@ export default function Products() {
       }
 
       showToast(`Deleted ${totalDeleted} products`, "success");
-      // Clear cache for this branch
       localStorage.removeItem(`products_cache_${user.uid}_${state.selectedBranchId}`);
       loadProducts(true);
     } catch (error) {
@@ -925,12 +992,33 @@ export default function Products() {
         }
         showToast("Product updated", "success");
       } else {
-        await createProductWithUniqueBarcode({ ...productData, createdAt: serverTimestamp() });
+        if (cleanedBarcode) {
+          const barcodeRef = getUserBarcodeDoc(user.uid, cleanedBarcode);
+          const barcodeSnap = await getDoc(barcodeRef);
+          if (barcodeSnap.exists()) {
+            throw new Error("Barcode already exists");
+          }
+          
+          const productsRef = getUserProductsRef(user.uid);
+          const productRef = doc(productsRef);
+          
+          await runTransaction(db, async (tx) => {
+            tx.set(productRef, { ...productData, createdAt: serverTimestamp() });
+            tx.set(barcodeRef, {
+              productId: productRef.id,
+              branchId: state.selectedBranchId,
+              ownerId: user.uid,
+              createdAt: serverTimestamp()
+            });
+          });
+        } else {
+          const productsRef = getUserProductsRef(user.uid);
+          await addDoc(productsRef, { ...productData, createdAt: serverTimestamp() });
+        }
         showToast("Product created", "success");
       }
       
       resetForm();
-      // Clear cache to force refresh
       localStorage.removeItem(`products_cache_${user.uid}_${state.selectedBranchId}`);
       await loadProducts(true);
     } catch (error: any) {
@@ -943,8 +1031,8 @@ export default function Products() {
     state.isSubmitting, state.loading, state.name, state.category, state.unit, state.qty, 
     state.minStock, state.purchase, state.sale, state.allowSale, state.barcode, 
     state.selectedProduct, state.selectedBranchId, authUser, cleanBarcode, 
-    createProductWithUniqueBarcode, validateProduct, showToast, resetForm, loadProducts,
-    getUserProductDoc, getUserBarcodeDoc
+    validateProduct, showToast, resetForm, loadProducts,
+    getUserProductDoc, getUserBarcodeDoc, getUserProductsRef
   ]);
 
   // Delete single product
@@ -964,7 +1052,6 @@ export default function Products() {
       await deleteDoc(productRef);
       
       showToast("Product deleted", "success");
-      // Clear cache
       localStorage.removeItem(`products_cache_${user.uid}_${state.selectedBranchId}`);
       resetForm();
       await loadProducts(true);
@@ -1067,6 +1154,26 @@ export default function Products() {
       {/* Offline Banner */}
       <OfflineBanner isOffline={state.isOffline} />
 
+      {/* Import Progress Modal */}
+      {state.importProgress > 0 && state.importProgress < 100 && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[100]">
+          <div className="bg-white rounded-2xl p-6 max-w-md w-full mx-4 shadow-2xl">
+            <div className="text-center mb-4">
+              <div className="animate-spin rounded-full h-12 w-12 border-4 border-blue-600 border-t-transparent mx-auto mb-3"></div>
+              <h3 className="text-lg font-bold text-gray-900">Importing Products</h3>
+              <p className="text-sm text-gray-500 mt-1">{state.importStatus}</p>
+            </div>
+            <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
+              <div 
+                className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                style={{ width: `${state.importProgress}%` }}
+              ></div>
+            </div>
+            <p className="text-xs text-gray-400 text-center">{state.importProgress}%</p>
+          </div>
+        </div>
+      )}
+
       {/* Toast */}
       {state.toast && (
         <div className="fixed top-4 right-4 z-50 animate-slide-in">
@@ -1128,7 +1235,7 @@ export default function Products() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Search - same as original */}
+        {/* Search */}
         <div className="mb-8">
           <div className="relative max-w-2xl mx-auto">
             <input
@@ -1151,9 +1258,14 @@ export default function Products() {
                   <span className="w-10 h-10 bg-gradient-to-br from-gray-900 to-gray-800 rounded-xl flex items-center justify-center text-white">📋</span>
                   Product List
                 </h2>
-                <span className="bg-gray-900 text-white px-3 py-1 rounded-full text-sm font-semibold">
-                  {filteredProducts.length} items
-                </span>
+                <div className="flex gap-2">
+                  <span className="bg-gray-900 text-white px-3 py-1 rounded-full text-sm font-semibold">
+                    Showing: {filteredProducts.length}
+                  </span>
+                  <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm font-semibold">
+                    Total: {state.totalProductCount}
+                  </span>
+                </div>
               </div>
 
               <select
@@ -1165,7 +1277,7 @@ export default function Products() {
                 disabled={state.loading}
               >
                 <option value="">Select or Search Product</option>
-                {filteredProducts.slice(0, 100).map(p => (
+                {filteredProducts.map(p => (
                   <option key={p.id} value={p.id}>{p.name} ({p.qty} {p.unit})</option>
                 ))}
               </select>
@@ -1214,7 +1326,7 @@ export default function Products() {
               </div>
             </div>
 
-            {/* Import Excel - same as original */}
+            {/* Import Excel */}
             <div className="bg-gradient-to-br from-emerald-50 to-teal-50 backdrop-blur-xl rounded-2xl shadow-xl border border-emerald-200/60 p-6">
               <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-3">
                 <span className="w-10 h-10 bg-gradient-to-br from-emerald-500 to-teal-500 rounded-xl flex items-center justify-center text-white">📊</span>
@@ -1237,12 +1349,15 @@ export default function Products() {
                 className="hidden" 
               />
               <div className="mt-4 p-3 bg-white/60 rounded-xl border text-xs text-gray-600">
-                Columns: <code className="bg-emerald-100 px-1 py-px rounded font-mono">name, category, unit, qty, minStock, purchaseRate, saleRate, barcode</code>
+                <p className="font-semibold mb-1">Required Columns:</p>
+                <code className="bg-emerald-100 px-1 py-px rounded font-mono">name, category, unit, qty, minStock, purchaseRate, saleRate, barcode</code>
+                <p className="mt-2 text-emerald-700">✓ Up to 2000 products per import</p>
+                <p className="text-emerald-700">✓ Duplicate barcodes are automatically skipped</p>
               </div>
             </div>
           </div>
 
-          {/* Right Column - Product Form (same as original) */}
+          {/* Right Column - Product Form */}
           <div className="bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border p-6">
             <h2 className="text-xl font-bold text-gray-900 mb-6 flex items-center gap-3">
               <span className="w-10 h-10 bg-gradient-to-br from-blue-500 to-indigo-500 rounded-xl flex items-center justify-center text-white">
