@@ -1,109 +1,76 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import { auth } from "@/lib/firebase";
-import { onIdTokenChanged, getIdToken } from "firebase/auth";
+import { useEffect, useCallback } from "react";
+import { extendPOSSession } from "@/lib/auth";
 
 export default function SessionManager() {
-  const refreshIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const activityTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // 🚀 Activity-based extension (mousemove, touch, etc.)
+  const extendOnActivity = useCallback(() => {
+    extendPOSSession();
+  }, []);
 
-  // Function to refresh token
-  const refreshToken = async () => {
-    try {
-      const user = auth.currentUser;
-      if (user) {
-        const token = await getIdToken(user, true);
-        console.log("✅ Token refreshed at:", new Date().toLocaleTimeString());
-        return token;
-      }
-    } catch (error) {
-      console.error("❌ Token refresh failed:", error);
-    }
-    return null;
-  };
-
-  // Reset activity timeout
-  const resetActivityTimeout = () => {
-    if (activityTimeoutRef.current) {
-      clearTimeout(activityTimeoutRef.current);
-    }
-    
-    // Set a timeout to refresh token after 45 minutes of inactivity
-    activityTimeoutRef.current = setTimeout(() => {
-      console.log("⏰ Activity timeout - refreshing token");
-      refreshToken();
-    }, 45 * 60 * 1000); // 45 minutes
-  };
-
-  // Track user activity
   useEffect(() => {
-    const events = ['mousedown', 'keydown', 'touchstart', 'click', 'scroll'];
-    
-    const handleActivity = () => {
-      resetActivityTimeout();
+    console.log("🎮 SessionManager: Activity tracking started");
+
+    // All activity events
+    const events = [
+      "mousemove",
+      "mousedown",
+      "mouseup", 
+      "keydown",
+      "scroll",
+      "click",
+      "touchstart",
+      "touchmove"
+    ];
+
+    // Throttle activity events
+    let activityTimeout: NodeJS.Timeout;
+    const throttledExtend = () => {
+      clearTimeout(activityTimeout);
+      activityTimeout = setTimeout(extendOnActivity, 1000); // 1s debounce
     };
-    
-    events.forEach(event => {
-      window.addEventListener(event, handleActivity);
+
+    events.forEach((event) => {
+      document.addEventListener(event, throttledExtend, { passive: true });
     });
-    
+
+    // Initial extend
+    extendOnActivity();
+
     return () => {
-      events.forEach(event => {
-        window.removeEventListener(event, handleActivity);
+      events.forEach((event) => {
+        document.removeEventListener(event, throttledExtend);
       });
-      if (activityTimeoutRef.current) {
-        clearTimeout(activityTimeoutRef.current);
-      }
+      clearTimeout(activityTimeout);
     };
-  }, []);
+  }, [extendOnActivity]);
 
-  // Set up token refresh on auth state change
+  // 🚀 Listen for custom session events
   useEffect(() => {
-    let isMounted = true;
+    const handleSessionEvents = (e: Event) => {
+      console.log("📨 Session event:", e.type);
+      extendPOSSession();
+    };
 
-    // Listen for auth state changes
-    const unsubscribe = onIdTokenChanged(auth, async (user) => {
-      if (!isMounted) return;
-      
-      if (user) {
-        console.log("👤 User authenticated:", user.email);
-        
-        // Clear any existing interval
-        if (refreshIntervalRef.current) {
-          clearInterval(refreshIntervalRef.current);
-        }
-        
-        // Refresh token every 30 minutes (safer than 45)
-        refreshIntervalRef.current = setInterval(() => {
-          console.log("🔄 Auto-refreshing auth token...");
-          refreshToken();
-        }, 30 * 60 * 1000); // 30 minutes
-        
-        // Initial refresh
-        await refreshToken();
-        resetActivityTimeout();
-      } else {
-        console.log("👤 No user authenticated");
-        if (refreshIntervalRef.current) {
-          clearInterval(refreshIntervalRef.current);
-          refreshIntervalRef.current = null;
-        }
-      }
-    });
-
+    window.addEventListener("pos_session_updated", handleSessionEvents);
+    window.addEventListener("session_synced", handleSessionEvents);
+    
     return () => {
-      isMounted = false;
-      unsubscribe();
-      if (refreshIntervalRef.current) {
-        clearInterval(refreshIntervalRef.current);
-      }
-      if (activityTimeoutRef.current) {
-        clearTimeout(activityTimeoutRef.current);
-      }
+      window.removeEventListener("pos_session_updated", handleSessionEvents);
+      window.removeEventListener("session_synced", handleSessionEvents);
     };
   }, []);
 
-  // This component doesn't render anything
-  return null;
+  // 🚀 Before unload (PWA close)
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      console.log("🚪 App closing - session saved for 12hrs");
+    };
+    
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, []);
+
+  return null; // Invisible activity tracker 🎯
 }
